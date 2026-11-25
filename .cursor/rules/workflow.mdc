@@ -1,0 +1,13 @@
+---
+description: EchoCanvas 跨 Agent 自包含项目管理与交接工作流规范
+alwaysApply: true
+---
+
+# EchoCanvas Cursor 工作流规则
+
+本仓库采用 Git 自包含的多 Agent 协同工作流，唯一行为规范见根目录 `AGENTS.md`。
+
+1. **开工前**：先运行 `python .workflow/scripts/workflow.py status` 和 `python .workflow/scripts/workflow.py ready`；只读取最新 `.workflow/handoffs/*.md`、`.workflow/decisions.md` 及当前任务的 `context_files`。
+2. **认领任务**：开始修改代码前运行 `python .workflow/scripts/workflow.py claim <TASK_ID> --agent "cursor/<model>"`。
+3. **架构与安全约束**：严格遵循 `docs/03-TDD.md` 中的 Go 控制面网关 + Python Sidecar 边界以及 ADR-01~ADR-04，所有模型外部调用必须经 Go 网关代理记账；严禁写入任何真实 Key、个人隐私或本机绝对路径。
+4. **收尾交接**：验证命令通过后运行 `complete`，提交前必跑 `python .workflow/scripts/workflow.py scan-secrets`，停工或切换工具前必须运行 `handoff` 并保持工作区整洁。

@@ -1,0 +1,62 @@
+# OS & IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-*
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Go
+/services/go-gateway/bin/
+/services/go-gateway/tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+/apps/web/.next/
+/apps/web/out/
+/apps/web/dist/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+*.tsbuildinfo
+
+# Local runtime data, logs & generated media
+*.log
+logs/
+tmp/
+/deploy/data/
+/eval/artifacts/
+*.png
+*.jpg
+*.jpeg
+*.webp
+!docs/assets/*

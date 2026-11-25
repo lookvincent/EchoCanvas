@@ -1,0 +1,18 @@
+{
+  "project": "EchoCanvas",
+  "current_stage": "S4",
+  "current_milestone": "M1",
+  "active_task_id": null,
+  "gates": {
+    "S1": "passed",
+    "S2": "passed",
+    "S3": "passed",
+    "M1": "pending",
+    "M2": "pending",
+    "M3": "pending",
+    "M4": "pending"
+  },
+  "latest_handoff": ".workflow/handoffs/2026-11-25_001_init.md",
+  "updated_at": "2026-11-25T13:55:00+08:00",
+  "updated_by": "antigravity/init"
+}
