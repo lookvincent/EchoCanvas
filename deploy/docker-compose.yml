@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: echocanvas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-echocanvas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_local_pg_password}
+      POSTGRES_DB: ${POSTGRES_DB:-echocanvas}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-echocanvas} -d ${POSTGRES_DB:-echocanvas}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - echocanvas-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: echocanvas-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - echocanvas-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: echocanvas-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin_changeme}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - echocanvas-net
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: echocanvas-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin_changeme}
+      MINIO_BUCKET: ${MINIO_BUCKET:-echocanvas-media}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY" &&
+        mc mb --ignore-existing "local/$$MINIO_BUCKET"
+    restart: "no"
+    networks:
+      - echocanvas-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  echocanvas-net:
+    driver: bridge
