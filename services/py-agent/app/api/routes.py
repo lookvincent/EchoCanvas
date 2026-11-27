@@ -11,6 +11,7 @@ from app.adapters.gateway_client import (
     UpstreamUnavailableError,
 )
 from app.memory.working_context import WorkingContextBuilder
+from app.quality.vlm_checker import VLMQualityChecker
 from app.schemas import (
     FrameVersionResponse,
     MemoryRetrieveRequest,
@@ -21,6 +22,8 @@ from app.schemas import (
     RenderFrameRequest,
     ResumeWorkflowRequest,
     ResumeWorkflowResponse,
+    VLMJudgeCompareRequest,
+    VLMJudgeCompareResponse,
 )
 from app.security import get_trace_id, verify_internal_token
 from app.services.workflow_service import WorkflowConflictError, WorkflowService
@@ -119,3 +122,16 @@ def retrieve_memory(
         max_prompt_chars=payload.max_prompt_chars,
         top_k=payload.top_k,
     )
+
+
+@router.post("/eval/vlm-judge", response_model=VLMJudgeCompareResponse)
+def eval_vlm_judge(
+    payload: VLMJudgeCompareRequest,
+    request: Request,
+    trace_id: str = Depends(get_trace_id),
+) -> VLMJudgeCompareResponse:
+    checker: VLMQualityChecker = request.app.state.vlm_checker
+    try:
+        return checker.judge_comparison(payload, trace_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc

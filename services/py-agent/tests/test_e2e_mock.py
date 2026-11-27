@@ -134,10 +134,28 @@ def _start_mock_upstream(port: int) -> tuple[ThreadingHTTPServer, _MockUpstreamS
             body = json.loads(raw.decode("utf-8"))
 
             if self.path.endswith("/chat/completions"):
-                messages = " ".join(m.get("content", "") for m in body.get("messages", []))
+                msg_parts: list[str] = []
+                for m in body.get("messages", []):
+                    c = m.get("content", "")
+                    if isinstance(c, str):
+                        msg_parts.append(c)
+                    elif isinstance(c, list):
+                        for block in c:
+                            if isinstance(block, dict) and block.get("text"):
+                                msg_parts.append(str(block["text"]))
+                messages = " ".join(msg_parts)
                 with state.lock:
                     state.chat_calls.append(body)
-                if "Local Edit Instruction (Gate 3)" in messages:
+                if "VLM_QUALITY_CHECK" in messages:
+                    content = json.dumps(
+                        {
+                            "score": 8.8,
+                            "character_consistent": True,
+                            "missing_props": [],
+                            "fix_hint": "",
+                        }
+                    )
+                elif "Local Edit Instruction (Gate 3)" in messages:
                     content = json.dumps(rewrite_payload)
                 elif "sequential storyboard frames" in messages:
                     content = json.dumps(plan_payload)
@@ -461,7 +479,7 @@ def test_go_python_full_lifecycle_e2e_with_sidecar_restart_recovery(tmp_path: Pa
             assert "frame_completed" in final_sse_text
             assert "job_completed" in final_sse_text
 
-            # 11. Check Usage Ledger recorded LLM_TEXT + IMAGE_GEN and positive total_cost_usd
+            # 11. Check Usage Ledger recorded LLM_TEXT + IMAGE_GEN + VLM_JUDGE and persisted VLM scores
             usage_resp = client.get(f"/api/v1/jobs/{job_id}/usage")
             assert usage_resp.status_code == 200
             usage = usage_resp.json()["data"]
@@ -469,6 +487,8 @@ def test_go_python_full_lifecycle_e2e_with_sidecar_restart_recovery(tmp_path: Pa
             call_types = {b["call_type"] for b in usage["breakdown"]}
             assert "LLM_TEXT" in call_types
             assert "IMAGE_GEN" in call_types
+            assert "VLM_JUDGE" in call_types
+            assert all(v["vlm_score"] == pytest.approx(8.8) for v in done_detail["versions"])
 
             # 12. Gate 3 single-frame local regeneration on Frame 2 (leaves Frame 1/3 versions intact)
             frame2 = next(f for f in done_detail["frames"] if f["frame_index"] == 2)

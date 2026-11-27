@@ -17,6 +17,8 @@ from app.graphs.checkpointer import CheckpointerManager
 from app.graphs.story_graph import build_story_graph
 from app.memory.repository import InMemoryMemoryRepository, MemoryRepository
 from app.memory.working_context import WorkingContextBuilder
+from app.observability.tracing import TraceRecorder
+from app.quality.vlm_checker import VLMQualityChecker
 from app.repository.story_repo import InMemoryStoryRepository, StoryRepository
 from app.services.workflow_service import WorkflowService
 
@@ -32,6 +34,8 @@ def create_app(
     story_repo: Any = None,
     s3_storage: S3StorageAdapter | None = None,
     vision_adapter: VisionAdapter | None = None,
+    trace_recorder: TraceRecorder | None = None,
+    vlm_checker: VLMQualityChecker | None = None,
 ) -> FastAPI:
     """Create configured FastAPI app with optional injected dependencies for tests."""
     resolved_settings = settings or Settings.from_env()
@@ -72,6 +76,19 @@ def create_app(
         s3_storage=active_s3,
         download_remote_images=False,
     )
+    owns_tracer = trace_recorder is None
+    active_tracer = trace_recorder or TraceRecorder(
+        langfuse_host=resolved_settings.langfuse_host,
+        public_key=resolved_settings.langfuse_public_key,
+        secret_key=resolved_settings.langfuse_secret_key,
+    )
+    active_vlm_checker = vlm_checker or VLMQualityChecker(
+        gateway_client=resolved_gateway,
+        pass_threshold=resolved_settings.vlm_pass_threshold,
+        max_retries=resolved_settings.vlm_max_retries,
+        vlm_model=resolved_settings.vlm_model,
+        trace_recorder=active_tracer,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -94,12 +111,16 @@ def create_app(
             story_repo=active_story_repo,
             context_builder=context_builder,
             vision_adapter=active_vision,
+            vlm_checker=active_vlm_checker,
+            trace_recorder=active_tracer,
         )
 
         application.state.settings = resolved_settings
         application.state.gateway_client = resolved_gateway
         application.state.s3_storage = active_s3
         application.state.vision_adapter = active_vision
+        application.state.trace_recorder = active_tracer
+        application.state.vlm_checker = active_vlm_checker
         application.state.cp_manager = cp_manager
         application.state.db_pool = pool
         application.state.checkpointer = active_cp
@@ -112,6 +133,8 @@ def create_app(
             yield
         finally:
             cp_manager.close()
+            if owns_tracer:
+                active_tracer.close()
             if owns_gateway:
                 resolved_gateway.close()
 

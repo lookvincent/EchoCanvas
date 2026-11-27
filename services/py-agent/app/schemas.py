@@ -167,3 +167,43 @@ class MemoryRetrieveResponse(BaseModel):
     dropped_conflicts: list[str] = Field(default_factory=list)
     estimated_tokens: int = 0
     trimmed: bool = False
+
+
+class VLMCheckResult(BaseModel):
+    """Structured VLM auto-QA assessment returned by vlm_quality_check."""
+
+    score: float = Field(ge=0.0, le=10.0)
+    character_consistent: bool = True
+    missing_props: list[str] = Field(default_factory=list)
+    fix_hint: str = ""
+    needs_manual_review: bool = False
+    attempts: int = 1
+
+
+class VLMSequenceScore(BaseModel):
+    """Comparative VLM-as-a-Judge scores for a storyboard image sequence."""
+
+    character_consistency: float = Field(ge=0.0, le=10.0)
+    prop_scene_continuity: float = Field(ge=0.0, le=10.0)
+    script_adherence: float = Field(ge=0.0, le=10.0)
+    overall_score: float = Field(ge=0.0, le=10.0)
+
+
+class VLMJudgeCompareRequest(BaseModel):
+    """Payload for POST /internal/v1/eval/vlm-judge."""
+
+    story_summary: str = Field(min_length=1)
+    asset_profiles: list[dict[str, Any]] = Field(default_factory=list)
+    baseline_images: list[str] = Field(min_length=1)
+    echocanvas_images: list[str] = Field(min_length=1)
+    job_id: str | None = None
+
+
+class VLMJudgeCompareResponse(BaseModel):
+    """Structured comparative Eval output returned by VLM-as-a-Judge."""
+
+    baseline: VLMSequenceScore
+    echocanvas: VLMSequenceScore
+    winner: Literal["baseline", "echocanvas", "tie"]
+    rationale: str = ""
+    trace_id: str = ""

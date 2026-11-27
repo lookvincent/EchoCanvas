@@ -1,14 +1,17 @@
-"""WorkflowService: coordinates LangGraph checkpoints, memory recall, rendering, and regen."""
+"""WorkflowService: coordinates LangGraph checkpoints, memory recall, rendering, QA, and regen."""
 
 from __future__ import annotations
 
 import json
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Any
 
 from app.adapters.gateway_client import GatewayClient
 from app.adapters.vision_adapter import VisionAdapter
 from app.memory.working_context import WorkingContextBuilder
+from app.observability.tracing import TraceRecorder
+from app.quality.vlm_checker import VLMQualityChecker
 from app.repository.story_repo import InMemoryStoryRepository
 from app.schemas import (
     AssetCard,
@@ -30,7 +33,7 @@ class WorkflowConflictError(ValueError):
 
 
 class WorkflowService:
-    """High-level coordinator bridging LangGraph state, DB persistence, and Go Gateway."""
+    """High-level coordinator bridging LangGraph state, DB persistence, VLM QA, and Go Gateway."""
 
     def __init__(
         self,
@@ -40,6 +43,8 @@ class WorkflowService:
         story_repo: Any,
         context_builder: WorkingContextBuilder,
         vision_adapter: VisionAdapter | None = None,
+        vlm_checker: VLMQualityChecker | None = None,
+        trace_recorder: TraceRecorder | None = None,
     ) -> None:
         self.graph = graph
         self.gateway_client = gateway_client
@@ -47,45 +52,66 @@ class WorkflowService:
         self.story_repo = story_repo
         self.context_builder = context_builder
         self.vision_adapter = vision_adapter or VisionAdapter(gateway_client)
+        self.trace_recorder = trace_recorder
+        self.vlm_checker = vlm_checker or VLMQualityChecker(
+            gateway_client, trace_recorder=trace_recorder
+        )
+
+    def _span(
+        self,
+        name: str,
+        trace_id: str,
+        job_id: str = "",
+        frame_id: str = "",
+    ):
+        if self.trace_recorder is None:
+            return nullcontext({})
+        return self.trace_recorder.span(
+            span_name=name,
+            trace_id=trace_id,
+            job_id=job_id,
+            frame_id=frame_id,
+        )
 
     def parse_story(self, payload: ParseStoryRequest, trace_id: str) -> ParseStoryResponse:
-        if isinstance(self.story_repo, InMemoryStoryRepository):
-            self.story_repo.ensure_job(
+        with self._span("workflow.parse_story", trace_id=trace_id, job_id=payload.job_id):
+            if isinstance(self.story_repo, InMemoryStoryRepository):
+                self.story_repo.ensure_job(
+                    job_id=payload.job_id,
+                    project_id=payload.project_id or "",
+                    thread_id=payload.thread_id,
+                    aspect_ratio=payload.aspect_ratio,
+                    style_preset=payload.style_preset,
+                )
+
+            config = {"configurable": {"thread_id": payload.thread_id}}
+            initial_state = {
+                "job_id": payload.job_id,
+                "project_id": payload.project_id or "",
+                "raw_story": payload.raw_story,
+                "style_preset": payload.style_preset,
+                "aspect_ratio": payload.aspect_ratio,
+                "target_frames": payload.target_frames,
+                "trace_id": trace_id,
+            }
+            result = self.graph.invoke(initial_state, config=config)
+
+            extracted = [AssetCard.model_validate(item) for item in (result.get("assets") or [])]
+            if payload.project_id:
+                saved_assets = self.memory_repo.upsert_assets(payload.project_id, extracted)
+            else:
+                saved_assets = extracted
+
+            self.story_repo.update_job_status(payload.job_id, "WAITING_GATE", "GATE_1")
+
+            return ParseStoryResponse(
                 job_id=payload.job_id,
-                project_id=payload.project_id or "",
                 thread_id=payload.thread_id,
-                aspect_ratio=payload.aspect_ratio,
-                style_preset=payload.style_preset,
+                status="WAITING_GATE",
+                current_stage="GATE_1",
+                assets=saved_assets,
+                trace_id=trace_id,
             )
-
-        config = {"configurable": {"thread_id": payload.thread_id}}
-        initial_state = {
-            "job_id": payload.job_id,
-            "project_id": payload.project_id or "",
-            "raw_story": payload.raw_story,
-            "style_preset": payload.style_preset,
-            "aspect_ratio": payload.aspect_ratio,
-            "target_frames": payload.target_frames,
-            "trace_id": trace_id,
-        }
-        result = self.graph.invoke(initial_state, config=config)
-
-        extracted = [AssetCard.model_validate(item) for item in (result.get("assets") or [])]
-        if payload.project_id:
-            saved_assets = self.memory_repo.upsert_assets(payload.project_id, extracted)
-        else:
-            saved_assets = extracted
-
-        self.story_repo.update_job_status(payload.job_id, "WAITING_GATE", "GATE_1")
-
-        return ParseStoryResponse(
-            job_id=payload.job_id,
-            thread_id=payload.thread_id,
-            status="WAITING_GATE",
-            current_stage="GATE_1",
-            assets=saved_assets,
-            trace_id=trace_id,
-        )
 
     def _apply_gate1_asset_edits(
         self,
@@ -152,112 +178,113 @@ class WorkflowService:
         job_id = payload.job_id or state_vals.get("job_id") or ""
         project_id = payload.project_id or state_vals.get("project_id") or ""
 
-        if payload.gate_no == 1:
-            if "plan_script_node" not in next_nodes:
-                raise WorkflowConflictError(
-                    f"thread {payload.thread_id} is not waiting at Gate 1 (next={next_nodes})"
+        with self._span("workflow.resume", trace_id=trace_id, job_id=job_id):
+            if payload.gate_no == 1:
+                if "plan_script_node" not in next_nodes:
+                    raise WorkflowConflictError(
+                        f"thread {payload.thread_id} is not waiting at Gate 1 (next={next_nodes})"
+                    )
+
+                current_assets = (
+                    self.memory_repo.list_project_assets(project_id)
+                    if project_id
+                    else [AssetCard.model_validate(a) for a in (state_vals.get("assets") or [])]
+                )
+                asset_edits = payload.user_edits.get("assets")
+                if isinstance(asset_edits, list) and asset_edits:
+                    current_assets = self._apply_gate1_asset_edits(
+                        project_id, current_assets, asset_edits
+                    )
+
+                self.graph.update_state(
+                    config,
+                    {
+                        "assets": [a.model_dump(mode="json") for a in current_assets],
+                        "gate1_confirmed": True,
+                        "trace_id": trace_id,
+                    },
+                )
+                result = self.graph.invoke(None, config=config)
+
+                raw_frames = [FrameScript.model_validate(f) for f in (result.get("frames") or [])]
+                saved_frames = (
+                    self.story_repo.upsert_story_frames(job_id, raw_frames)
+                    if job_id
+                    else raw_frames
                 )
 
-            current_assets = (
-                self.memory_repo.list_project_assets(project_id)
-                if project_id
-                else [AssetCard.model_validate(a) for a in (state_vals.get("assets") or [])]
-            )
-            asset_edits = payload.user_edits.get("assets")
-            if isinstance(asset_edits, list) and asset_edits:
-                current_assets = self._apply_gate1_asset_edits(
-                    project_id, current_assets, asset_edits
+                raw_states = [
+                    EntityStateSnapshot.model_validate(s) for s in (result.get("entity_states") or [])
+                ]
+                grouped: dict[int, list[EntityStateSnapshot]] = defaultdict(list)
+                for st in raw_states:
+                    grouped[st.frame_index].append(st)
+
+                persisted_states: list[EntityStateSnapshot] = []
+                if job_id:
+                    for fidx in sorted(grouped.keys()):
+                        persisted_states.extend(
+                            self.memory_repo.upsert_episodic_states(job_id, fidx, grouped[fidx])
+                        )
+                    self.story_repo.update_job_status(job_id, "WAITING_GATE", "GATE_2")
+                else:
+                    persisted_states = raw_states
+
+                return ResumeWorkflowResponse(
+                    job_id=job_id or None,
+                    thread_id=payload.thread_id,
+                    status="WAITING_GATE",
+                    current_stage="GATE_2",
+                    frames=saved_frames,
+                    entity_states=persisted_states,
+                    trace_id=trace_id,
                 )
+
+            # gate_no == 2
+            if "dispatch_render_node" not in next_nodes:
+                raise WorkflowConflictError(
+                    f"thread {payload.thread_id} is not waiting at Gate 2 (next={next_nodes})"
+                )
+
+            frame_edits = payload.user_edits.get("frames")
+            if job_id and isinstance(frame_edits, list) and frame_edits:
+                saved_frames = self.story_repo.apply_frame_edits(job_id, frame_edits)
+            elif job_id:
+                rows = self.story_repo.list_frames(job_id)
+                saved_frames = []
+                for r in rows:
+                    script_data = dict(r["script_json"] or {})
+                    script_data["frame_index"] = r["frame_index"]
+                    script_data["id"] = r["id"]
+                    saved_frames.append(FrameScript.model_validate(script_data))
+            else:
+                saved_frames = [FrameScript.model_validate(f) for f in (state_vals.get("frames") or [])]
 
             self.graph.update_state(
                 config,
                 {
-                    "assets": [a.model_dump(mode="json") for a in current_assets],
-                    "gate1_confirmed": True,
+                    "frames": [f.model_dump(mode="json") for f in saved_frames],
+                    "gate2_confirmed": True,
                     "trace_id": trace_id,
                 },
             )
-            result = self.graph.invoke(None, config=config)
+            self.graph.invoke(None, config=config)
 
-            raw_frames = [FrameScript.model_validate(f) for f in (result.get("frames") or [])]
-            saved_frames = (
-                self.story_repo.upsert_story_frames(job_id, raw_frames)
-                if job_id
-                else raw_frames
-            )
-
-            raw_states = [
-                EntityStateSnapshot.model_validate(s) for s in (result.get("entity_states") or [])
-            ]
-            grouped: dict[int, list[EntityStateSnapshot]] = defaultdict(list)
-            for st in raw_states:
-                grouped[st.frame_index].append(st)
-
-            persisted_states: list[EntityStateSnapshot] = []
             if job_id:
-                for fidx in sorted(grouped.keys()):
-                    persisted_states.extend(
-                        self.memory_repo.upsert_episodic_states(job_id, fidx, grouped[fidx])
-                    )
-                self.story_repo.update_job_status(job_id, "WAITING_GATE", "GATE_2")
-            else:
-                persisted_states = raw_states
+                self.story_repo.update_job_status(job_id, "RUNNING", "RENDER_FRAMES")
 
             return ResumeWorkflowResponse(
                 job_id=job_id or None,
                 thread_id=payload.thread_id,
-                status="WAITING_GATE",
-                current_stage="GATE_2",
+                status="RUNNING",
+                current_stage="RENDER_FRAMES",
                 frames=saved_frames,
-                entity_states=persisted_states,
+                entity_states=[
+                    EntityStateSnapshot.model_validate(s)
+                    for s in (state_vals.get("entity_states") or [])
+                ],
                 trace_id=trace_id,
             )
-
-        # gate_no == 2
-        if "dispatch_render_node" not in next_nodes:
-            raise WorkflowConflictError(
-                f"thread {payload.thread_id} is not waiting at Gate 2 (next={next_nodes})"
-            )
-
-        frame_edits = payload.user_edits.get("frames")
-        if job_id and isinstance(frame_edits, list) and frame_edits:
-            saved_frames = self.story_repo.apply_frame_edits(job_id, frame_edits)
-        elif job_id:
-            rows = self.story_repo.list_frames(job_id)
-            saved_frames = []
-            for r in rows:
-                script_data = dict(r["script_json"] or {})
-                script_data["frame_index"] = r["frame_index"]
-                script_data["id"] = r["id"]
-                saved_frames.append(FrameScript.model_validate(script_data))
-        else:
-            saved_frames = [FrameScript.model_validate(f) for f in (state_vals.get("frames") or [])]
-
-        self.graph.update_state(
-            config,
-            {
-                "frames": [f.model_dump(mode="json") for f in saved_frames],
-                "gate2_confirmed": True,
-                "trace_id": trace_id,
-            },
-        )
-        self.graph.invoke(None, config=config)
-
-        if job_id:
-            self.story_repo.update_job_status(job_id, "RUNNING", "RENDER_FRAMES")
-
-        return ResumeWorkflowResponse(
-            job_id=job_id or None,
-            thread_id=payload.thread_id,
-            status="RUNNING",
-            current_stage="RENDER_FRAMES",
-            frames=saved_frames,
-            entity_states=[
-                EntityStateSnapshot.model_validate(s)
-                for s in (state_vals.get("entity_states") or [])
-            ],
-            trace_id=trace_id,
-        )
 
     def render_frame(
         self,
@@ -280,54 +307,67 @@ class WorkflowService:
         script_data["id"] = frame_id
         frame_script = FrameScript.model_validate(script_data)
 
-        ctx = self.context_builder.build(
-            project_id=project_id,
-            job_id=job_id,
-            frame_index=frame_index,
-            frame_script=frame_script,
-            style_preset=style_preset,
-            max_prompt_chars=1200,
-            top_k=3,
-        )
+        with self._span("workflow.render_frame", trace_id=trace_id, job_id=job_id, frame_id=frame_id):
+            ctx = self.context_builder.build(
+                project_id=project_id,
+                job_id=job_id,
+                frame_index=frame_index,
+                frame_script=frame_script,
+                style_preset=style_preset,
+                max_prompt_chars=1200,
+                top_k=3,
+            )
 
-        render_res = self.vision_adapter.render_frame_image(
-            prompt=ctx.assembled_prompt,
-            job_id=job_id,
-            frame_id=frame_id,
-            trace_id=trace_id,
-            project_id=project_id,
-            version_hint=1,
-            aspect_ratio=aspect_ratio,
-            reference_image_url=ctx.reference_image_url,
-            seed=payload.seed,
-        )
+            outcome = self.vlm_checker.render_and_verify(
+                render_fn=lambda prompt, attempt: self.vision_adapter.render_frame_image(
+                    prompt=prompt,
+                    job_id=job_id,
+                    frame_id=frame_id,
+                    trace_id=trace_id,
+                    project_id=project_id,
+                    version_hint=1,
+                    aspect_ratio=aspect_ratio,
+                    reference_image_url=ctx.reference_image_url,
+                    seed=payload.seed,
+                ),
+                base_prompt=ctx.assembled_prompt,
+                frame_script=frame_script,
+                locked_assets=ctx.locked_assets,
+                prev_entity_states=ctx.prev_entity_states,
+                job_id=job_id,
+                frame_id=frame_id,
+                trace_id=trace_id,
+                reference_image_url=ctx.reference_image_url,
+            )
 
-        ver = self.story_repo.create_frame_version(
-            frame_id=frame_id,
-            prompt_snapshot=ctx.assembled_prompt,
-            image_url=render_res.image_url,
-            seed=render_res.seed,
-        )
-        if frame_index == 1:
-            self.story_repo.set_character_reference_if_empty(project_id, render_res.image_url)
+            ver = self.story_repo.create_frame_version(
+                frame_id=frame_id,
+                prompt_snapshot=outcome.prompt_snapshot,
+                image_url=outcome.image_url,
+                seed=outcome.seed,
+                vlm_score=outcome.vlm_result.score,
+                vlm_feedback=outcome.vlm_result.model_dump(mode="json"),
+            )
+            if frame_index == 1:
+                self.story_repo.set_character_reference_if_empty(project_id, outcome.image_url)
 
-        # Seed current-frame episodic baseline if missing so Frame N+1 can diff cleanly.
-        if not self.memory_repo.get_episodic_states(job_id, frame_index):
-            entities = frame_script.entities or [
-                a.entity_key for a in ctx.locked_assets if a.asset_type == "CHARACTER"
-            ]
-            baseline_states = [
-                EntityStateSnapshot(
-                    frame_index=frame_index,
-                    entity_key=ekey,
-                    state_json={"action": frame_script.action, "lighting": frame_script.lighting},
-                )
-                for ekey in entities
-            ]
-            if baseline_states:
-                self.memory_repo.upsert_episodic_states(job_id, frame_index, baseline_states)
+            # Seed current-frame episodic baseline if missing so Frame N+1 can diff cleanly.
+            if not self.memory_repo.get_episodic_states(job_id, frame_index):
+                entities = frame_script.entities or [
+                    a.entity_key for a in ctx.locked_assets if a.asset_type == "CHARACTER"
+                ]
+                baseline_states = [
+                    EntityStateSnapshot(
+                        frame_index=frame_index,
+                        entity_key=ekey,
+                        state_json={"action": frame_script.action, "lighting": frame_script.lighting},
+                    )
+                    for ekey in entities
+                ]
+                if baseline_states:
+                    self.memory_repo.upsert_episodic_states(job_id, frame_index, baseline_states)
 
-        return ver
+            return ver
 
     def _cascade_downstream_states(
         self,
@@ -394,81 +434,94 @@ class WorkflowService:
         script_data["id"] = frame_id
         frame_script = FrameScript.model_validate(script_data)
 
-        ctx = self.context_builder.build(
-            project_id=project_id,
-            job_id=job_id,
-            frame_index=frame_index,
-            frame_script=frame_script,
-            style_preset=style_preset,
-            max_prompt_chars=1200,
-            top_k=3,
-        )
-
-        locked_summary = json.dumps(
-            [a.model_dump(mode="json") for a in ctx.locked_assets],
-            ensure_ascii=False,
-        )
-        rewrite = self.gateway_client.chat_json(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an image prompt editor. Rewrite the storyboard prompt to incorporate the user's "
-                        "local edit note while strictly preserving every locked user_ground_truth attribute. "
-                        'Return JSON: {"rewritten_prompt": "...", "updated_entity_states": [{"frame_index": N, "entity_key": "...", "state_json": {...}}]}.'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Frame index: {frame_index}\n"
-                        f"Locked Assets (IMMUTABLE): {locked_summary}\n"
-                        f"Base Working Context Prompt:\n{ctx.assembled_prompt}\n\n"
-                        f"User Local Edit Instruction (Gate 3): {payload.user_edit_note}"
-                    ),
-                },
-            ],
-            schema_cls=PromptRewritePayload,
-            job_id=job_id,
-            frame_id=frame_id,
-            trace_id=trace_id,
-            call_type="LLM_TEXT",
-        )
-
-        render_res = self.vision_adapter.render_frame_image(
-            prompt=rewrite.rewritten_prompt,
-            job_id=job_id,
-            frame_id=frame_id,
-            trace_id=trace_id,
-            project_id=project_id,
-            version_hint=payload.version_no or 2,
-            aspect_ratio=aspect_ratio,
-            reference_image_url=ctx.reference_image_url,
-            seed=payload.seed,
-        )
-
-        ver = self.story_repo.create_frame_version(
-            frame_id=frame_id,
-            prompt_snapshot=rewrite.rewritten_prompt,
-            image_url=render_res.image_url,
-            user_edit_note=payload.user_edit_note,
-            seed=render_res.seed,
-        )
-
-        normalized_states = [
-            st.model_copy(update={"frame_index": frame_index})
-            for st in rewrite.updated_entity_states
-        ]
-        if normalized_states:
-            self.memory_repo.upsert_episodic_states(job_id, frame_index, normalized_states)
-
-        cascaded: list[int] = []
-        if payload.cascade_downstream:
-            cascaded = self._cascade_downstream_states(
+        with self._span("workflow.regenerate_frame", trace_id=trace_id, job_id=job_id, frame_id=frame_id):
+            ctx = self.context_builder.build(
+                project_id=project_id,
                 job_id=job_id,
-                current_frame_index=frame_index,
-                user_edit_note=payload.user_edit_note,
-                updated_states=normalized_states,
+                frame_index=frame_index,
+                frame_script=frame_script,
+                style_preset=style_preset,
+                max_prompt_chars=1200,
+                top_k=3,
             )
 
-        return ver.model_copy(update={"cascaded_frame_indices": cascaded})
+            locked_summary = json.dumps(
+                [a.model_dump(mode="json") for a in ctx.locked_assets],
+                ensure_ascii=False,
+            )
+            rewrite = self.gateway_client.chat_json(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an image prompt editor. Rewrite the storyboard prompt to incorporate the user's "
+                            "local edit note while strictly preserving every locked user_ground_truth attribute. "
+                            'Return JSON: {"rewritten_prompt": "...", "updated_entity_states": [{"frame_index": N, "entity_key": "...", "state_json": {...}}]}.'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Frame index: {frame_index}\n"
+                            f"Locked Assets (IMMUTABLE): {locked_summary}\n"
+                            f"Base Working Context Prompt:\n{ctx.assembled_prompt}\n\n"
+                            f"User Local Edit Instruction (Gate 3): {payload.user_edit_note}"
+                        ),
+                    },
+                ],
+                schema_cls=PromptRewritePayload,
+                job_id=job_id,
+                frame_id=frame_id,
+                trace_id=trace_id,
+                call_type="LLM_TEXT",
+            )
+
+            outcome = self.vlm_checker.render_and_verify(
+                render_fn=lambda prompt, attempt: self.vision_adapter.render_frame_image(
+                    prompt=prompt,
+                    job_id=job_id,
+                    frame_id=frame_id,
+                    trace_id=trace_id,
+                    project_id=project_id,
+                    version_hint=payload.version_no or 2,
+                    aspect_ratio=aspect_ratio,
+                    reference_image_url=ctx.reference_image_url,
+                    seed=payload.seed,
+                ),
+                base_prompt=rewrite.rewritten_prompt,
+                frame_script=frame_script,
+                locked_assets=ctx.locked_assets,
+                prev_entity_states=ctx.prev_entity_states,
+                job_id=job_id,
+                frame_id=frame_id,
+                trace_id=trace_id,
+                reference_image_url=ctx.reference_image_url,
+            )
+
+            ver = self.story_repo.create_frame_version(
+                frame_id=frame_id,
+                prompt_snapshot=outcome.prompt_snapshot,
+                image_url=outcome.image_url,
+                user_edit_note=payload.user_edit_note,
+                seed=outcome.seed,
+                vlm_score=outcome.vlm_result.score,
+                vlm_feedback=outcome.vlm_result.model_dump(mode="json"),
+            )
+
+            normalized_states = [
+                st.model_copy(update={"frame_index": frame_index})
+                for st in rewrite.updated_entity_states
+            ]
+            if normalized_states:
+                self.memory_repo.upsert_episodic_states(job_id, frame_index, normalized_states)
+
+            cascaded: list[int] = []
+            if payload.cascade_downstream:
+                cascaded = self._cascade_downstream_states(
+                    job_id=job_id,
+                    current_frame_index=frame_index,
+                    user_edit_note=payload.user_edit_note,
+                    updated_states=normalized_states,
+                )
+
+            return ver.model_copy(update={"cascaded_frame_indices": cascaded})

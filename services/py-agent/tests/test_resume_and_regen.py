@@ -109,11 +109,43 @@ def _make_mock_gateway(
 
     image_counter = 0
 
+    def _flatten_content(messages: list[dict]) -> str:
+        parts: list[str] = []
+        for m in messages:
+            c = m.get("content", "")
+            if isinstance(c, str):
+                parts.append(c)
+            elif isinstance(c, list):
+                for block in c:
+                    if isinstance(block, dict) and block.get("text"):
+                        parts.append(str(block["text"]))
+        return " ".join(parts)
+
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal image_counter
         if request.url.path.endswith("/chat/completions"):
             body = json.loads(request.content.decode("utf-8"))
-            content = " ".join(m.get("content", "") for m in body.get("messages", []))
+            content = _flatten_content(body.get("messages", []))
+            if "VLM_QUALITY_CHECK" in content:
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "score": 8.8,
+                                            "character_consistent": True,
+                                            "missing_props": [],
+                                            "fix_hint": "",
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                )
             if "Local Edit Instruction (Gate 3)" in content:
                 if safety_block_regen:
                     return httpx.Response(422, json={"code": 42201, "message": "SAFETY_BLOCKED"})
