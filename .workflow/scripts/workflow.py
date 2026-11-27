@@ -211,6 +211,25 @@ def cmd_scan_secrets(_args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_python_cmd(cmd: list[str], cwd: Path) -> list[str]:
+    if not cmd:
+        return cmd
+    exe_name = Path(cmd[0]).name.lower()
+    if cmd[0] in {"python", "python3", sys.executable} or exe_name in {
+        "python",
+        "python.exe",
+        "python3",
+        "python3.exe",
+    }:
+        for candidate in (
+            cwd / ".venv" / "Scripts" / "python.exe",
+            cwd / ".venv" / "bin" / "python",
+        ):
+            if candidate.is_file():
+                return [str(candidate), *cmd[1:]]
+    return cmd
+
+
 def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
@@ -269,7 +288,8 @@ def verify_task(task_id: str) -> tuple[bool, list[str]]:
         if not cwd.is_dir():
             errors.append(f"Working directory not found for command {' '.join(cmd)}: {cwd_rel}")
             continue
-        ok, out = run_cmd(cmd, cwd, env=env)
+        resolved_cmd = resolve_python_cmd(cmd, cwd)
+        ok, out = run_cmd(resolved_cmd, cwd, env=env)
         if not ok:
             errors.append(f"Command failed ({' '.join(cmd)} in {cwd_rel}):\n{out}")
             continue
@@ -635,9 +655,21 @@ def cmd_verify_gate(args: argparse.Namespace) -> int:
         if incomplete:
             errors.append(f"Incomplete M2 tasks: {', '.join(incomplete)}")
         if (py_dir / "pyproject.toml").is_file():
-            ok, out = run_cmd([sys.executable, "-m", "pytest"], py_dir, env=env)
+            pytest_cmd = resolve_python_cmd([sys.executable, "-m", "pytest", "-v"], py_dir)
+            ok, out = run_cmd(pytest_cmd, py_dir, env=env)
+            low = out.lower()
             if not ok:
                 errors.append(f"pytest failed:\n{out}")
+            elif "no tests ran" in low or "passed" not in low:
+                errors.append(f"pytest did not report passed tests:\n{out}")
+        go_dir = REPO_ROOT / "services" / "go-gateway"
+        if (go_dir / "go.mod").is_file():
+            ok_vet, out_vet = run_cmd(["go", "vet", "./..."], go_dir, env=env)
+            if not ok_vet:
+                errors.append(f"go vet ./... failed:\n{out_vet}")
+            ok_test, out_test = run_cmd(["go", "test", "-count=1", "./..."], go_dir, env=env)
+            if not ok_test:
+                errors.append(f"go test -count=1 ./... failed:\n{out_test}")
 
     elif stage == "M3":
         report = REPO_ROOT / "eval" / "reports" / "latest_eval_report.md"
