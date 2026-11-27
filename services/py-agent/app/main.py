@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import FastAPI
 
 from app.adapters.gateway_client import GatewayClient
+from app.adapters.s3_storage import S3StorageAdapter
+from app.adapters.vision_adapter import VisionAdapter
 from app.api.routes import router
 from app.config import Settings
 from app.graphs.checkpointer import CheckpointerManager
@@ -28,6 +30,8 @@ def create_app(
     enable_db_persistence: bool | None = None,
     memory_repo: Any = None,
     story_repo: Any = None,
+    s3_storage: S3StorageAdapter | None = None,
+    vision_adapter: VisionAdapter | None = None,
 ) -> FastAPI:
     """Create configured FastAPI app with optional injected dependencies for tests."""
     resolved_settings = settings or Settings.from_env()
@@ -44,6 +48,30 @@ def create_app(
         else (checkpointer is None and bool(resolved_settings.database_url))
     )
     cp_manager = CheckpointerManager(resolved_settings.database_url if use_db else "")
+
+    active_s3 = s3_storage
+    if (
+        active_s3 is None
+        and use_db
+        and resolved_settings.s3_endpoint
+        and resolved_settings.s3_access_key
+        and resolved_settings.s3_secret_key
+    ):
+        active_s3 = S3StorageAdapter(
+            endpoint=resolved_settings.s3_endpoint,
+            bucket=resolved_settings.s3_bucket,
+            access_key=resolved_settings.s3_access_key,
+            secret_key=resolved_settings.s3_secret_key,
+            region=resolved_settings.s3_region,
+            use_ssl=resolved_settings.s3_use_ssl,
+            presign_expires_sec=resolved_settings.s3_presign_expires_sec,
+        )
+
+    active_vision = vision_adapter or VisionAdapter(
+        gateway_client=resolved_gateway,
+        s3_storage=active_s3,
+        download_remote_images=False,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -65,10 +93,13 @@ def create_app(
             memory_repo=active_mem_repo,
             story_repo=active_story_repo,
             context_builder=context_builder,
+            vision_adapter=active_vision,
         )
 
         application.state.settings = resolved_settings
         application.state.gateway_client = resolved_gateway
+        application.state.s3_storage = active_s3
+        application.state.vision_adapter = active_vision
         application.state.cp_manager = cp_manager
         application.state.db_pool = pool
         application.state.checkpointer = active_cp

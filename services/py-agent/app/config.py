@@ -7,6 +7,23 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Service settings loaded from environment variables."""
@@ -19,6 +36,18 @@ class Settings:
     llm_model: str = "deepseek-chat"
     vision_model: str = "black-forest-labs/FLUX.1-dev"
     vlm_model: str = "gpt-4o-mini"
+    s3_endpoint: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_bucket: str = "echocanvas-media"
+    s3_use_ssl: bool = False
+    s3_presign_expires_sec: int = 3600
+    vlm_pass_threshold: float = 7.0
+    vlm_max_retries: int = 2
+    langfuse_host: str = ""
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -60,4 +89,16 @@ class Settings:
                 or "black-forest-labs/FLUX.1-dev"
             ),
             vlm_model=os.getenv("VLM_JUDGE_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+            s3_endpoint=os.getenv("S3_ENDPOINT", "").strip(),
+            s3_region=os.getenv("S3_REGION", "us-east-1").strip() or "us-east-1",
+            s3_access_key=os.getenv("S3_ACCESS_KEY", "").strip(),
+            s3_secret_key=os.getenv("S3_SECRET_KEY", "").strip(),
+            s3_bucket=os.getenv("S3_BUCKET", "echocanvas-media").strip() or "echocanvas-media",
+            s3_use_ssl=os.getenv("S3_USE_SSL", "").strip().lower() == "true",
+            s3_presign_expires_sec=max(60, _parse_int_env("S3_PRESIGN_EXPIRES_SEC", 3600)),
+            vlm_pass_threshold=_parse_float_env("VLM_PASS_THRESHOLD", 7.0),
+            vlm_max_retries=min(2, max(0, _parse_int_env("VLM_MAX_RETRIES", 2))),
+            langfuse_host=os.getenv("LANGFUSE_HOST", "").strip().rstrip("/"),
+            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", "").strip(),
+            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", "").strip(),
         )

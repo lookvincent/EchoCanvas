@@ -127,17 +127,18 @@ class GatewayClient:
 
     def chat_completions(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         job_id: str | None,
         trace_id: str,
         frame_id: str | None = None,
         call_type: str = "LLM_TEXT",
         temperature: float = 0.2,
         response_format: dict[str, Any] | None = None,
+        model_override: str | None = None,
     ) -> dict[str, Any]:
         """Call Go Gateway POST /proxy/v1/chat/completions."""
         body: dict[str, Any] = {
-            "model": self.llm_model,
+            "model": model_override or self.llm_model,
             "messages": messages,
             "temperature": temperature,
         }
@@ -154,13 +155,14 @@ class GatewayClient:
 
     def chat_json(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         schema_cls: type[TModel],
         job_id: str | None,
         trace_id: str,
         frame_id: str | None = None,
         call_type: str = "LLM_TEXT",
         temperature: float = 0.2,
+        model_override: str | None = None,
     ) -> TModel:
         """Call chat_completions and parse/validate output into a Pydantic model, with 1 repair retry."""
         raw_resp = self.chat_completions(
@@ -171,6 +173,7 @@ class GatewayClient:
             call_type=call_type,
             temperature=temperature,
             response_format={"type": "json_object"},
+            model_override=model_override,
         )
         raw_text = _extract_chat_content(raw_resp)
         cleaned = _strip_json_fences(raw_text)
@@ -198,6 +201,7 @@ class GatewayClient:
                 call_type=call_type,
                 temperature=0.0,
                 response_format={"type": "json_object"},
+                model_override=model_override,
             )
             repaired_text = _extract_chat_content(repaired_resp)
             repaired_clean = _strip_json_fences(repaired_text)
@@ -212,6 +216,10 @@ class GatewayClient:
         aspect_ratio: str = "16:9",
         reference_image_url: str | None = None,
         seed: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        ip_adapter_scale: float | None = None,
+        negative_prompt: str | None = None,
     ) -> dict[str, Any]:
         """Call Go Gateway POST /proxy/v1/images/generations."""
         payload: dict[str, Any] = {
@@ -220,8 +228,15 @@ class GatewayClient:
             "n": 1,
             "aspect_ratio": aspect_ratio,
         }
+        if width and height:
+            payload["width"] = width
+            payload["height"] = height
+            payload["image_size"] = f"{width}x{height}"
         if reference_image_url:
             payload["reference_image_url"] = reference_image_url
+            payload["ip_adapter_scale"] = ip_adapter_scale if ip_adapter_scale is not None else 0.65
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
         if seed is not None:
             payload["seed"] = seed
 
@@ -234,31 +249,36 @@ class GatewayClient:
         data = resp.json()
 
         image_url = ""
+        b64_json = ""
         resolved_seed = seed
         if isinstance(data.get("data"), list) and data["data"]:
             first = data["data"][0]
             image_url = str(first.get("url") or "")
+            b64_json = str(first.get("b64_json") or "")
             if first.get("seed") is not None:
                 resolved_seed = int(first["seed"])
         elif isinstance(data.get("images"), list) and data["images"]:
             first = data["images"][0]
             if isinstance(first, dict):
                 image_url = str(first.get("url") or "")
+                b64_json = str(first.get("b64_json") or "")
                 if first.get("seed") is not None:
                     resolved_seed = int(first["seed"])
             elif isinstance(first, str):
                 image_url = first
-        elif data.get("image_url"):
-            image_url = str(data["image_url"])
+        elif data.get("image_url") or data.get("b64_json"):
+            image_url = str(data.get("image_url") or "")
+            b64_json = str(data.get("b64_json") or "")
 
-        if not image_url:
-            raise GatewayError("image generation response missing image URL", status_code=502)
+        if not image_url and not b64_json:
+            raise GatewayError("image generation response missing image URL or b64_json", status_code=502)
 
         if resolved_seed is None and data.get("seed") is not None:
             resolved_seed = int(data["seed"])
 
         return {
             "image_url": image_url,
+            "b64_json": b64_json,
             "seed": resolved_seed,
             "raw": data,
         }

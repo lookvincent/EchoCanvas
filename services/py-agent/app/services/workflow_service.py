@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.adapters.gateway_client import GatewayClient
+from app.adapters.vision_adapter import VisionAdapter
 from app.memory.working_context import WorkingContextBuilder
 from app.repository.story_repo import InMemoryStoryRepository
 from app.schemas import (
@@ -38,12 +39,14 @@ class WorkflowService:
         memory_repo: Any,
         story_repo: Any,
         context_builder: WorkingContextBuilder,
+        vision_adapter: VisionAdapter | None = None,
     ) -> None:
         self.graph = graph
         self.gateway_client = gateway_client
         self.memory_repo = memory_repo
         self.story_repo = story_repo
         self.context_builder = context_builder
+        self.vision_adapter = vision_adapter or VisionAdapter(gateway_client)
 
     def parse_story(self, payload: ParseStoryRequest, trace_id: str) -> ParseStoryResponse:
         if isinstance(self.story_repo, InMemoryStoryRepository):
@@ -287,11 +290,13 @@ class WorkflowService:
             top_k=3,
         )
 
-        img = self.gateway_client.generate_image(
+        render_res = self.vision_adapter.render_frame_image(
             prompt=ctx.assembled_prompt,
             job_id=job_id,
             frame_id=frame_id,
             trace_id=trace_id,
+            project_id=project_id,
+            version_hint=1,
             aspect_ratio=aspect_ratio,
             reference_image_url=ctx.reference_image_url,
             seed=payload.seed,
@@ -300,11 +305,11 @@ class WorkflowService:
         ver = self.story_repo.create_frame_version(
             frame_id=frame_id,
             prompt_snapshot=ctx.assembled_prompt,
-            image_url=img["image_url"],
-            seed=img.get("seed"),
+            image_url=render_res.image_url,
+            seed=render_res.seed,
         )
         if frame_index == 1:
-            self.story_repo.set_character_reference_if_empty(project_id, img["image_url"])
+            self.story_repo.set_character_reference_if_empty(project_id, render_res.image_url)
 
         # Seed current-frame episodic baseline if missing so Frame N+1 can diff cleanly.
         if not self.memory_repo.get_episodic_states(job_id, frame_index):
@@ -430,11 +435,13 @@ class WorkflowService:
             call_type="LLM_TEXT",
         )
 
-        img = self.gateway_client.generate_image(
+        render_res = self.vision_adapter.render_frame_image(
             prompt=rewrite.rewritten_prompt,
             job_id=job_id,
             frame_id=frame_id,
             trace_id=trace_id,
+            project_id=project_id,
+            version_hint=payload.version_no or 2,
             aspect_ratio=aspect_ratio,
             reference_image_url=ctx.reference_image_url,
             seed=payload.seed,
@@ -443,9 +450,9 @@ class WorkflowService:
         ver = self.story_repo.create_frame_version(
             frame_id=frame_id,
             prompt_snapshot=rewrite.rewritten_prompt,
-            image_url=img["image_url"],
+            image_url=render_res.image_url,
             user_edit_note=payload.user_edit_note,
-            seed=img.get("seed"),
+            seed=render_res.seed,
         )
 
         normalized_states = [
