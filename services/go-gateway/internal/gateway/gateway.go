@@ -250,6 +250,19 @@ type rawUpstreamResp struct {
 	contentType string
 }
 
+func isOpenCodeEndpoint(ep config.ProviderEndpoint) bool {
+	return strings.Contains(strings.ToLower(ep.BaseURL), "opencode") ||
+		strings.Contains(strings.ToLower(ep.Name), "opencode")
+}
+
+func truncateBody(body []byte, maxLen int) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 func (g *AIGCGateway) doForward(ctx context.Context, ep config.ProviderEndpoint, path string, req ProxyRequest) (rawUpstreamResp, int, error) {
 	targetURL := strings.TrimRight(ep.BaseURL, "/") + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(req.Body))
@@ -267,6 +280,16 @@ func (g *AIGCGateway) doForward(ctx context.Context, ep config.ProviderEndpoint,
 	if req.TraceID != "" {
 		httpReq.Header.Set("X-Trace-ID", req.TraceID)
 	}
+	if isOpenCodeEndpoint(ep) {
+		sessionID := "ses_echocanvas"
+		if req.JobID != uuid.Nil {
+			sessionID = "ses_" + req.JobID.String()
+		} else if req.TraceID != "" {
+			sessionID = "ses_" + req.TraceID
+		}
+		httpReq.Header.Set("x-opencode-session", sessionID)
+		httpReq.Header.Set("User-Agent", "opencode/1.0")
+	}
 
 	start := time.Now()
 	httpResp, err := g.httpClient.Do(httpReq)
@@ -281,6 +304,14 @@ func (g *AIGCGateway) doForward(ctx context.Context, ep config.ProviderEndpoint,
 		return rawUpstreamResp{}, latencyMS, err
 	}
 
+	if httpResp.StatusCode >= 400 && g.logger != nil {
+		g.logger.Warn("upstream request rejected",
+			"provider", ep.Name,
+			"model", ep.Model,
+			"status", httpResp.StatusCode,
+			"body_snippet", truncateBody(body, 300),
+		)
+	}
 	if isSafetyRejected(httpResp.StatusCode, body) {
 		return rawUpstreamResp{}, latencyMS, ErrSafetyBlocked
 	}

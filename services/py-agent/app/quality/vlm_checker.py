@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import ipaddress
 import json
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
+
+import httpx
 
 from app.adapters.gateway_client import (
     BudgetExceededError,
@@ -38,6 +43,47 @@ class VerifiedRenderOutcome:
     needs_manual_review: bool
     attempts: int
     object_key: str | None = None
+
+
+_LOCAL_IMAGE_HOSTS = frozenset(
+    {"localhost", "127.0.0.1", "::1", "rustfs", "minio", "host.docker.internal"}
+)
+
+
+def _is_local_or_private_host(hostname: str) -> bool:
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        return False
+    if host in _LOCAL_IMAGE_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private
+    except ValueError:
+        return False
+
+
+def _resolve_image_url_for_vlm(url: str) -> str:
+    """Inline local/private HTTP images (e.g., RustFS presigned URLs) as base64 data URIs for remote VLMs."""
+    if not url or url.startswith("data:"):
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not _is_local_or_private_host(
+        parsed.hostname or ""
+    ):
+        return url
+    try:
+        resp = httpx.get(url, timeout=15.0, trust_env=False)
+        if resp.status_code == 200 and resp.content and len(resp.content) <= 3_000_000:
+            content_type = (
+                resp.headers.get("content-type", "image/png").split(";")[0].strip()
+                or "image/png"
+            )
+            b64 = base64.b64encode(resp.content).decode("ascii")
+            return f"data:{content_type};base64,{b64}"
+    except Exception as exc:  # pragma: no cover - best-effort fallback
+        logger.debug("Failed to inline local image URL %s for VLM: %s", url, exc)
+    return url
 
 
 def _build_targeted_retry_prompt(base_prompt: str, result: VLMCheckResult) -> str:
@@ -141,16 +187,18 @@ class VLMQualityChecker:
             '"missing_props": [...], "fix_hint": "..."}'
         )
 
+        resolved_image_url = _resolve_image_url_for_vlm(image_url)
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": instruction},
-            {"type": "image_url", "image_url": {"url": image_url}},
+            {"type": "image_url", "image_url": {"url": resolved_image_url}},
         ]
         if reference_image_url:
+            resolved_ref_url = _resolve_image_url_for_vlm(reference_image_url)
             user_content.append(
                 {"type": "text", "text": "Reference character anchor image:"}
             )
             user_content.append(
-                {"type": "image_url", "image_url": {"url": reference_image_url}}
+                {"type": "image_url", "image_url": {"url": resolved_ref_url}}
             )
 
         return self.gateway_client.chat_json(
@@ -302,10 +350,10 @@ class VLMQualityChecker:
                 {"type": "text", "text": "Baseline frames:"},
             ]
             for url in req.baseline_images:
-                content.append({"type": "image_url", "image_url": {"url": url}})
+                content.append({"type": "image_url", "image_url": {"url": _resolve_image_url_for_vlm(url)}})
             content.append({"type": "text", "text": "EchoCanvas frames:"})
             for url in req.echocanvas_images:
-                content.append({"type": "image_url", "image_url": {"url": url}})
+                content.append({"type": "image_url", "image_url": {"url": _resolve_image_url_for_vlm(url)}})
 
             res = self.gateway_client.chat_json(
                 messages=[

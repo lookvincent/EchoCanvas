@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 
 import httpx
 import pytest
@@ -319,3 +322,79 @@ def test_langfuse_ingestion_and_eval_vlm_judge_endpoint() -> None:
         assert body["winner"] == "echocanvas"
         assert body["echocanvas"]["overall_score"] == pytest.approx(9.0)
         assert body["trace_id"] == "tr_eval_api"
+
+
+def test_vlm_inlines_local_http_image_as_data_uri() -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    class _ImgHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png_bytes)))
+            self.end_headers()
+            self.wfile.write(png_bytes)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _ImgHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    captured_urls: list[str] = []
+
+    def gw_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        for msg in payload.get("messages", []):
+            if isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        captured_urls.append(str(block["image_url"]["url"]))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "score": 8.4,
+                                    "character_consistent": True,
+                                    "missing_props": [],
+                                    "fix_hint": "",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    try:
+        gw = GatewayClient(
+            "http://mock-gw.local/proxy/v1",
+            internal_token="test_internal_token",
+            transport=httpx.MockTransport(gw_handler),
+        )
+        checker = VLMQualityChecker(gw, vlm_model="deepseek-v4.1-flash")
+        res = checker.check_image(
+            image_url=f"http://127.0.0.1:{port}/frame1.png",
+            frame_script=_sample_script(),
+            locked_assets=_sample_assets(),
+            prev_entity_states=_sample_states(),
+            job_id="job-inline",
+            frame_id="frame-inline",
+            trace_id="tr_inline",
+            reference_image_url="https://cdn.example.com/ref.png",
+        )
+        assert res.score == pytest.approx(8.4)
+        assert len(captured_urls) == 2
+        assert captured_urls[0].startswith("data:image/png;base64,")
+        assert captured_urls[1] == "https://cdn.example.com/ref.png"
+    finally:
+        srv.shutdown()
+        srv.server_close()

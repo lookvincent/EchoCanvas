@@ -330,3 +330,51 @@ func TestAIGCGateway_RateLimiter(t *testing.T) {
 		t.Fatalf("expected ErrRateLimited on second immediate call, got %v", err)
 	}
 }
+
+func TestAIGCGateway_OpenCodeHeaders(t *testing.T) {
+	var gotSession, gotUA, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-opencode-session")
+		gotUA = r.Header.Get("User-Agent")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	usageRepo := newMemUsageRepo()
+	jobID := uuid.New()
+	usageRepo.seedJob(jobID, model.JobStatusRunning, 1.0, 0)
+
+	gw := New(usageRepo, sse.NewMemoryBroker(), config.Config{
+		LLMPrimary: config.ProviderEndpoint{
+			Name:    "opencodego",
+			BaseURL: srv.URL,
+			Model:   "deepseek-v4.1-flash",
+			APIKey:  "test-key",
+		},
+	}, Options{RPM: 600})
+
+	resp, err := gw.Proxy(context.Background(), "llm", ProxyRequest{
+		JobID:    jobID,
+		TraceID:  "tr_opencode",
+		CallType: model.CallTypeLLMText,
+		Body:     []byte(`{"model":"deepseek-v4.1-flash","messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error forwarding to opencodego endpoint: %v", err)
+	}
+	if resp.ProviderUsed != "opencodego" {
+		t.Fatalf("expected provider opencodego, got %s", resp.ProviderUsed)
+	}
+	wantSession := "ses_" + jobID.String()
+	if gotSession != wantSession {
+		t.Fatalf("expected x-opencode-session %q, got %q", wantSession, gotSession)
+	}
+	if gotUA != "opencode/1.0" {
+		t.Fatalf("expected User-Agent opencode/1.0, got %q", gotUA)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("expected Authorization Bearer test-key, got %q", gotAuth)
+	}
+}
