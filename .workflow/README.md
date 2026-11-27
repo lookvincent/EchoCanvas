@@ -46,17 +46,21 @@ python .workflow/scripts/workflow.py ready
 python .workflow/scripts/workflow.py claim T-M1-01 --agent "codex/gpt-5"
 ```
 
-### 4. 完成任务并记录真实证据
+### 4. 运行严谨任务卡点并自动推进下一个任务（`complete` 已内置 `verify-task`）
 ```bash
-python .workflow/scripts/workflow.py complete T-M1-01 --evidence "docker compose up -d && psql verified 8 tables"
+# 单独运行该任务的 5 层卡点检查（依赖、scan-secrets、必交文件、单测/构建及防空测校验）
+python .workflow/scripts/workflow.py verify-task T-M1-03
+
+# 卡点通过后标记 done 并自动输出下一批无阻塞 ready 任务，随后直接认领下一个继续推进
+python .workflow/scripts/workflow.py complete T-M1-03 --evidence "verify-task passed"
 ```
 
-### 5. 提交前执行密钥与隐私零泄露审计（必跑）
+### 5. 提交前执行密钥与隐私零泄露审计（`verify-task` 与 `verify-gate` 均已内置）
 ```bash
 python .workflow/scripts/workflow.py scan-secrets
 ```
 
-### 6. 生成交接快照（换电脑或切换 Agent 前必执行）
+### 6. 生成交接快照（换电脑、切换 Agent 或里程碑收尾时执行）
 ```bash
 python .workflow/scripts/workflow.py handoff \
   --agent "antigravity" \
@@ -67,9 +71,9 @@ python .workflow/scripts/workflow.py handoff \
   --files "deploy/docker-compose.yml,deploy/sql/001_init.sql"
 ```
 
-### 7. 执行里程碑硬门禁检查（自动包含 `scan-secrets`）
+### 7. 执行里程碑硬门禁检查（自动包含 `scan-secrets` 与全量构建测试）
 ```bash
 python .workflow/scripts/workflow.py verify-gate S2
 python .workflow/scripts/workflow.py verify-gate S3
-python .workflow/scripts/workflow.py verify-gate M1
+python .workflow/scripts/workflow.py verify-gate M1 --update-state
 ```

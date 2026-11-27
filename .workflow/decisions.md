@@ -16,6 +16,7 @@
 ## 二、 安全、业务与工作流强制约束
 
 * **[SEC-01] 公开仓密钥与隐私零泄露红线**：本项目将在完成后开源公开。严禁在代码、文档、配置、测试夹具、`.workflow/handoffs/` 或 Git Commit 中写入真实 API Key/Token/密码、个人姓名/工作邮箱/公司名或本机绝对路径；所有 `.workflow/scripts/workflow.py verify-gate` 门禁及每次提交前强制通过 `scan-secrets` 审计。
+* **[WF-01] 严谨任务卡点与自主连续推进协议**：每个任务均绑定 `required_files` 与可执行 `acceptance_cmds`（由 `verify-task` 强制校验，`complete` 默认先执行 `verify-task`）。任务通过验收卡点并原子提交后，Agent 自动 `ready` 并认领下一无阻塞任务连续推进，无需逐个向用户确认；仅在连续 2 次卡点失败、缺失外部凭证或需变更冻结 ADR 时暂停交回。
 * **[BIZ-01] 人机协同三卡点不可跳过**：流程必须保留 `Gate 1`（资产锁定 `user_ground_truth`）、`Gate 2`（分镜脚本审阅）与 `Gate 3`（单帧局部重绘），避免未确认直接触发批量生图扣费。
 * **[BIZ-02] 自动质检重试硬上限**：`vlm_quality_check` 不合格自动定向重试严格限制 `<= 2` 次；被上游安全过滤拦截（`SAFETY_BLOCKED`）立即终止重试并返回 `422xx`。
 * **[BIZ-03] 数据指标真实性**：所有一致性提升比例、Token 降幅与 P95 耗时只能从 `eval/` 跑完后写入，严禁在代码、文档或 README 中虚构数字。

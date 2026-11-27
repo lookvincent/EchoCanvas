@@ -58,23 +58,25 @@
 
 ---
 
-## 4. 强制交接封箱协议（Session Handoff Protocol）
+## 4. 严谨任务卡点与自主连续推进协议（`[WF-01]`）
 
-每次会话结束、准备切换模型/工具或暂停工作前，**必须完成以下 5 步**：
+每次执行任务时，**无需在每个原子任务完成后向用户请示确认**，严格按以下“**卡点验收 → 自动推进**”闭环连续执行：
 
-1. **真实验证**：运行当前任务对应的 `verify_cmd`（或对应模块的构建、单元测试、Lint 命令），确保取得真实的通过输出。
-2. **更新任务账本**：
+1. **前置核查与真实验证**：代码与测试全部完成后，必须运行可执行任务卡点：
+   ```bash
+   python .workflow/scripts/workflow.py verify-task <TASK_ID>
+   ```
+   该命令强制依次校验前置依赖、`scan-secrets` 零泄露、必交文件清单（`required_files`）、全部 `acceptance_cmds`（`go vet` / `go test` / `pytest` / `build`）以及防空测试校验。
+2. **闭环当前任务**：`complete` 已强制绑定 `verify-task`，只有卡点全部通过才会允许标记 `done` 并自动打印下一批可执行任务：
    ```bash
    python .workflow/scripts/workflow.py complete <TASK_ID> --evidence "<实际运行的命令及关键通过输出>"
    ```
-   *(若任务未完成即交接，请勿调用 `complete`，而是在下面的 `handoff` 中写清未完成断点。)*
-3. **沉淀决策与踩坑**：若本轮修改了约定、遇到环境坑或新增技术权衡，追加记录到 `.workflow/decisions.md`（注意同样遵守 P0 隐私零泄露红线）。
-4. **执行密钥与隐私扫描**：
-   ```bash
-   python .workflow/scripts/workflow.py scan-secrets
-   ```
-   必须返回 `[SCAN PASS]` 后方可进入下一步提交。
-5. **生成交接快照并提交 Git**：
+3. **沉淀决策与原子提交**：若本轮遇到环境坑或新增技术权衡，追加记录到 `.workflow/decisions.md`（严守 P0 隐私红线）；随后检查 `git status` 并完成原子提交（`feat/fix/docs/chore(scope): ...`）。
+4. **自动连续推进下一个任务**：若 `complete` 输出 `[AUTO-ADVANCE]` 列出了无阻塞任务（或当前里程碑全部完成则先执行 `verify-gate <STAGE> --update-state`），直接认领下一个任务继续推进，直至本里程碑闭环或遇到以下暂停条件：
+   * 同一任务卡点连续修复 **2 次**仍失败；
+   * 缺失外部真实密钥/凭证或需要调整已冻结的 `ADR-01~04`；
+   * 涉及不可逆高风险远端操作。
+5. **切换工具/暂停前的交接快照**：当需要切换电脑、切换模型或结束当前里程碑时，生成结构化交接快照并推送：
    ```bash
    python .workflow/scripts/workflow.py handoff \
      --agent "<tool>" \
@@ -83,16 +85,15 @@
      --next "<下一任Agent建议先做的任务与切入点>" \
      --pitfalls "<已知阻塞或注意事项，可选>"
    ```
-   随后执行 `git status` 检查变更范围，用规范提交信息（`feat/fix/docs/chore(scope): ...`）提交到本地仓库（远端推送需由用户确认）。
 
 ---
 
 ## 5. 里程碑硬门禁（Stage-Gate）
 
-每当一个阶段（`S2` / `S3` / `M1` / `M2` / `M3` / `M4`）收尾时，**必须运行可执行门禁脚本**（已自动内置 `scan-secrets` 审计）：
+每当一个阶段（`S2` / `S3` / `M1` / `M2` / `M3` / `M4`）收尾时，**必须运行可执行门禁脚本**（已自动内置 `scan-secrets` 审计与全量测试）：
 
 ```bash
-python .workflow/scripts/workflow.py verify-gate <STAGE>
+python .workflow/scripts/workflow.py verify-gate <STAGE> --update-state
 ```
 
 **脚本返回非 0 退出码时，严禁宣布该里程碑完成或推进下一阶段。**

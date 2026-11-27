@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,6 +24,14 @@ WORKFLOW_DIR = REPO_ROOT / ".workflow"
 STATE_PATH = WORKFLOW_DIR / "state.json"
 TASKS_PATH = WORKFLOW_DIR / "tasks.jsonl"
 HANDOFFS_DIR = WORKFLOW_DIR / "handoffs"
+DOTENV_PATH = REPO_ROOT / ".env"
+
+NEXT_MILESTONE = {
+    "M1": "M2",
+    "M2": "M3",
+    "M3": "M4",
+    "M4": "DONE",
+}
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next"}
 BINARY_EXTS = {
@@ -68,6 +77,23 @@ SAFE_PLACEHOLDER_PREFIXES = (
 
 def now_iso() -> str:
     return datetime.now(TZ_CN).replace(microsecond=0).isoformat()
+
+
+def load_dotenv_overlay() -> dict[str, str]:
+    env = os.environ.copy()
+    if DOTENV_PATH.is_file():
+        for raw_line in DOTENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip("\"'")
+            if key and key not in env:
+                env[key] = val
+        env.setdefault("RUN_PG_INTEGRATION", "1")
+        env.setdefault("RUN_REDIS_INTEGRATION", "1")
+    return env
 
 
 def load_state() -> dict:
@@ -185,6 +211,94 @@ def cmd_scan_secrets(_args: argparse.Namespace) -> int:
     return 0
 
 
+def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+        return proc.returncode == 0, output
+    except FileNotFoundError as exc:
+        return False, str(exc)
+
+
+def verify_task(task_id: str) -> tuple[bool, list[str]]:
+    tasks = load_tasks()
+    status_by_id = {t["id"]: t["status"] for t in tasks}
+    target = next((t for t in tasks if t["id"] == task_id), None)
+    if target is None:
+        return False, [f"Task not found: {task_id}"]
+
+    errors: list[str] = []
+
+    # 1. Dependency gate
+    unmet = [d for d in (target.get("depends_on") or []) if status_by_id.get(d) != "done"]
+    if unmet:
+        errors.append(f"Blocked by incomplete dependencies: {', '.join(unmet)}")
+
+    # 2. Zero-leak security & privacy gate
+    for sf in scan_secrets():
+        errors.append(f"[SEC-01] {sf}")
+
+    # 3. Required deliverables check
+    for rel_file in target.get("required_files") or []:
+        fpath = REPO_ROOT / rel_file
+        if not fpath.is_file():
+            errors.append(f"Missing required file: {rel_file}")
+        elif fpath.stat().st_size == 0:
+            errors.append(f"Required file is empty: {rel_file}")
+
+    # Stop before running commands if deliverables are missing
+    if errors:
+        return False, errors
+
+    # 4. Deterministic acceptance commands + anti-empty-test check
+    env = load_dotenv_overlay()
+    for spec in target.get("acceptance_cmds") or []:
+        cwd_rel = spec.get("cwd") or "."
+        cmd = spec.get("cmd") or []
+        if not cmd:
+            continue
+        cwd = REPO_ROOT / cwd_rel
+        if not cwd.is_dir():
+            errors.append(f"Working directory not found for command {' '.join(cmd)}: {cwd_rel}")
+            continue
+        ok, out = run_cmd(cmd, cwd, env=env)
+        if not ok:
+            errors.append(f"Command failed ({' '.join(cmd)} in {cwd_rel}):\n{out}")
+            continue
+
+        # Anti-fake-pass check for test suites
+        if cmd[0] == "go" and len(cmd) >= 2 and cmd[1] == "test":
+            if "no tests to run" in out.lower():
+                errors.append(f"Go test reported no tests to run ({' '.join(cmd)})")
+            elif not re.search(r"^(?:ok|PASS)\b", out, re.MULTILINE):
+                errors.append(f"Go test output missing PASS/ok marker ({' '.join(cmd)})")
+        elif "pytest" in cmd[0] or "pytest" in cmd:
+            low = out.lower()
+            if "no tests ran" in low or "passed" not in low:
+                errors.append(f"Pytest did not report passed tests ({' '.join(cmd)})")
+
+    return len(errors) == 0, errors
+
+
+def cmd_verify_task(args: argparse.Namespace) -> int:
+    ok, errors = verify_task(args.task_id)
+    if not ok:
+        print(f"[TASK GATE FAIL] {args.task_id}")
+        for err in errors:
+            print(f"  - {err}")
+        return 1
+    print(f"[TASK GATE PASS] {args.task_id}")
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     state = load_state()
     tasks = load_tasks()
@@ -290,6 +404,15 @@ def cmd_complete(args: argparse.Namespace) -> int:
         print("[ERROR] --evidence must not be empty.", file=sys.stderr)
         return 1
 
+    if not args.skip_verify:
+        ok, errors = verify_task(args.task_id)
+        if not ok:
+            print(f"[TASK GATE FAIL] Cannot complete {args.task_id}:", file=sys.stderr)
+            for err in errors:
+                print(f"  - {err}", file=sys.stderr)
+            return 1
+        print(f"[TASK GATE PASS] {args.task_id}")
+
     state = load_state()
     tasks = load_tasks()
     target = next((t for t in tasks if t["id"] == args.task_id), None)
@@ -311,6 +434,12 @@ def cmd_complete(args: argparse.Namespace) -> int:
     save_state(state)
 
     print(f"[OK] Completed {args.task_id}")
+    next_ready = compute_ready_tasks(tasks)
+    if next_ready:
+        next_ids = ", ".join(f"{t['id']} ({t['milestone']})" for t in next_ready)
+        print(f"[AUTO-ADVANCE] Ready next: {next_ids}")
+    else:
+        print("[AUTO-ADVANCE] No remaining ready tasks (milestone/project check due).")
     return 0
 
 
@@ -407,17 +536,6 @@ python .workflow/scripts/workflow.py claim {next_task_id} --agent "<your_tool>/<
     return 0
 
 
-def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace"
-        )
-        output = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode == 0, output.strip()
-    except FileNotFoundError as exc:
-        return False, str(exc)
-
-
 def check_milestone_tasks_done(tasks: list[dict], milestone: str) -> list[str]:
     return [
         t["id"]
@@ -430,6 +548,7 @@ def cmd_verify_gate(args: argparse.Namespace) -> int:
     stage = args.stage.upper()
     tasks = load_tasks()
     errors: list[str] = []
+    env = load_dotenv_overlay()
 
     secret_findings = scan_secrets()
     for sf in secret_findings:
@@ -499,10 +618,14 @@ def cmd_verify_gate(args: argparse.Namespace) -> int:
         incomplete = check_milestone_tasks_done(tasks, "M1")
         if incomplete:
             errors.append(f"Incomplete M1 tasks: {', '.join(incomplete)}")
-        if (REPO_ROOT / "services" / "go-gateway" / "go.mod").is_file():
-            ok, out = run_cmd(["go", "test", "./..."], REPO_ROOT / "services" / "go-gateway")
-            if not ok:
-                errors.append(f"go test ./... failed:\n{out}")
+        go_dir = REPO_ROOT / "services" / "go-gateway"
+        if (go_dir / "go.mod").is_file():
+            ok_vet, out_vet = run_cmd(["go", "vet", "./..."], go_dir, env=env)
+            if not ok_vet:
+                errors.append(f"go vet ./... failed:\n{out_vet}")
+            ok_test, out_test = run_cmd(["go", "test", "-count=1", "./..."], go_dir, env=env)
+            if not ok_test:
+                errors.append(f"go test -count=1 ./... failed:\n{out_test}")
 
     elif stage == "M2":
         py_dir = REPO_ROOT / "services" / "py-agent"
@@ -512,7 +635,7 @@ def cmd_verify_gate(args: argparse.Namespace) -> int:
         if incomplete:
             errors.append(f"Incomplete M2 tasks: {', '.join(incomplete)}")
         if (py_dir / "pyproject.toml").is_file():
-            ok, out = run_cmd([sys.executable, "-m", "pytest"], py_dir)
+            ok, out = run_cmd([sys.executable, "-m", "pytest"], py_dir, env=env)
             if not ok:
                 errors.append(f"pytest failed:\n{out}")
 
@@ -545,6 +668,13 @@ def cmd_verify_gate(args: argparse.Namespace) -> int:
     if args.update_state:
         state = load_state()
         state.setdefault("gates", {})[stage] = "passed"
+        if stage in NEXT_MILESTONE and state.get("current_milestone") == stage:
+            nxt = NEXT_MILESTONE[stage]
+            if nxt == "DONE":
+                state["current_stage"] = "S6"
+            elif nxt == "M4":
+                state["current_stage"] = "S5"
+            state["current_milestone"] = nxt
         state["updated_at"] = now_iso()
         save_state(state)
 
@@ -568,9 +698,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_claim.add_argument("--force", action="store_true", help="Override active task guard")
     p_claim.set_defaults(func=cmd_claim)
 
-    p_complete = sub.add_parser("complete", help="Mark a task done with verification evidence")
+    p_vtask = sub.add_parser("verify-task", help="Run strict acceptance gate for a single task")
+    p_vtask.add_argument("task_id", help="Task ID, e.g. T-M1-03")
+    p_vtask.set_defaults(func=cmd_verify_task)
+
+    p_complete = sub.add_parser("complete", help="Verify acceptance gate and mark task done")
     p_complete.add_argument("task_id", help="Task ID, e.g. T-M1-01")
     p_complete.add_argument("--evidence", required=True, help="Verification command/result summary")
+    p_complete.add_argument("--skip-verify", action="store_true", help="Skip verify-task check (discouraged)")
     p_complete.set_defaults(func=cmd_complete)
 
     p_handoff = sub.add_parser("handoff", help="Create structured handoff snapshot")

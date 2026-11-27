@@ -10,4 +10,4 @@ alwaysApply: true
 1. **开工前**：先运行 `python .workflow/scripts/workflow.py status` 和 `python .workflow/scripts/workflow.py ready`；只读取最新 `.workflow/handoffs/*.md`、`.workflow/decisions.md` 及当前任务的 `context_files`。
 2. **认领任务**：开始修改代码前运行 `python .workflow/scripts/workflow.py claim <TASK_ID> --agent "cursor/<model>"`。
 3. **架构与安全约束**：严格遵循 `docs/03-TDD.md` 中的 Go 控制面网关 + Python Sidecar 边界以及 ADR-01~ADR-04，所有模型外部调用必须经 Go 网关代理记账；严禁写入任何真实 Key、个人隐私或本机绝对路径。
-4. **收尾交接**：验证命令通过后运行 `complete`，提交前必跑 `python .workflow/scripts/workflow.py scan-secrets`，停工或切换工具前必须运行 `handoff` 并保持工作区整洁。
+4. **卡点验收与自主连续推进**：每完成一个任务必须跑通 `python .workflow/scripts/workflow.py verify-task <TASK_ID>`（`complete` 已内置强制校验），通过并提交后直接自动认领下一个 `ready` 任务连续推进，无需逐个请示；切换工具或里程碑收尾时运行 `handoff` 与 `verify-gate <STAGE> --update-state`。
