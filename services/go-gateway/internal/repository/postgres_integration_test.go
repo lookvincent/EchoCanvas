@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/config"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/model"
 )
@@ -134,5 +135,82 @@ func TestPostgresIntegration_ProjectAndAssetLifecycle(t *testing.T) {
 	_, getDeletedAssetErr := assetRepo.GetByID(ctx, asset.ID)
 	if !errors.Is(getDeletedAssetErr, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for cascade-deleted asset, got %v", getDeletedAssetErr)
+	}
+}
+
+func TestPostgresIntegration_JobIdempotencyAndOptimisticLock(t *testing.T) {
+	projRepo, _, cleanupPool := openIntegrationPool(t)
+	defer cleanupPool()
+
+	cfg, _ := config.Load()
+	ctx := context.Background()
+	pool, err := NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("connect pool: %v", err)
+	}
+	defer pool.Close()
+	jobRepo := NewPostgresJobRepository(pool)
+
+	p1Req := model.CreateProjectRequest{Title: "Job Repo Test 1", RawStory: "Story 1"}
+	_ = p1Req.NormalizeAndValidate()
+	p1, err := projRepo.Create(ctx, p1Req)
+	if err != nil {
+		t.Fatalf("create p1: %v", err)
+	}
+	t.Cleanup(func() { _ = projRepo.Delete(context.Background(), p1.ID) })
+
+	p2Req := model.CreateProjectRequest{Title: "Job Repo Test 2", RawStory: "Story 2"}
+	_ = p2Req.NormalizeAndValidate()
+	p2, err := projRepo.Create(ctx, p2Req)
+	if err != nil {
+		t.Fatalf("create p2: %v", err)
+	}
+	t.Cleanup(func() { _ = projRepo.Delete(context.Background(), p2.ID) })
+
+	idemKey := "pg-idem-" + uuid.NewString()
+	job1, created1, err := jobRepo.CreateOrGetByIdempotencyKey(ctx, p1.ID, idemKey, "th_"+uuid.NewString(), "tr_pg1", 1.0)
+	if err != nil || !created1 {
+		t.Fatalf("expected created1=true, err=nil; got created=%v err=%v", created1, err)
+	}
+
+	jobDup, createdDup, err := jobRepo.CreateOrGetByIdempotencyKey(ctx, p1.ID, idemKey, "th_"+uuid.NewString(), "tr_pg2", 1.0)
+	if err != nil || createdDup || jobDup.ID != job1.ID {
+		t.Fatalf("expected existing job %s with created=false, got id=%s created=%v err=%v", job1.ID, jobDup.ID, createdDup, err)
+	}
+
+	_, _, crossErr := jobRepo.CreateOrGetByIdempotencyKey(ctx, p2.ID, idemKey, "th_"+uuid.NewString(), "tr_pg3", 1.0)
+	if !errors.Is(crossErr, ErrConflict) {
+		t.Fatalf("expected ErrConflict when reusing idempotency_key on another project, got %v", crossErr)
+	}
+
+	frame, err := jobRepo.CreateFrame(ctx, job1.ID, 1, json.RawMessage(`{"shot":"wide","camera":"eye_level"}`))
+	if err != nil {
+		t.Fatalf("create frame: %v", err)
+	}
+	task, err := jobRepo.CreateFrameTask(ctx, job1.ID, frame.ID, model.TaskTypeInitialRender, 2)
+	if err != nil {
+		t.Fatalf("create frame task: %v", err)
+	}
+
+	queued, err := jobRepo.TransitionTaskStatus(ctx, task.ID, model.TaskStatusPending, model.TaskStatusQueued, nil, nil)
+	if err != nil || queued.Status != model.TaskStatusQueued {
+		t.Fatalf("PENDING->QUEUED failed: %+v err=%v", queued, err)
+	}
+	running, err := jobRepo.TransitionTaskStatus(ctx, task.ID, model.TaskStatusQueued, model.TaskStatusRunning, nil, nil)
+	if err != nil || running.Status != model.TaskStatusRunning || running.StartedAt == nil {
+		t.Fatalf("QUEUED->RUNNING failed: %+v err=%v", running, err)
+	}
+
+	// Stale transition QUEUED -> RUNNING must fail with ErrInvalidTransition
+	_, staleErr := jobRepo.TransitionTaskStatus(ctx, task.ID, model.TaskStatusQueued, model.TaskStatusRunning, nil, nil)
+	if !errors.Is(staleErr, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition on stale transition, got %v", staleErr)
+	}
+
+	errCode := "TRANSIENT"
+	errDetail := "timeout"
+	retried, err := jobRepo.IncrementTaskRetry(ctx, task.ID, model.TaskStatusQueued, &errCode, &errDetail)
+	if err != nil || retried.RetryCount != 1 {
+		t.Fatalf("IncrementTaskRetry failed: %+v err=%v", retried, err)
 	}
 }

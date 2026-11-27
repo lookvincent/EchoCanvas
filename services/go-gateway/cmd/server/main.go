@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/config"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/handler"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/repository"
+	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/scheduler"
+	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/sse"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -40,9 +44,38 @@ func main() {
 	}
 	defer pool.Close()
 
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	if err := rdb.Ping(initCtx).Err(); err != nil {
+		logger.Error("failed to connect to redis", "addr", cfg.RedisAddr, "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	asynqClient := asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisAddr})
+	defer func() { _ = asynqClient.Close() }()
+
 	projectRepo := repository.NewPostgresProjectRepository(pool)
 	assetRepo := repository.NewPostgresAssetRepository(pool)
-	router := handler.NewRouter(logger, pool, projectRepo, assetRepo)
+	jobRepo := repository.NewPostgresJobRepository(pool)
+	broker := sse.NewRedisBroker(rdb)
+	sched := scheduler.New(jobRepo, scheduler.NewAsynqEnqueuer(asynqClient), broker, nil, nil, 3, logger)
+
+	asynqSrv, asynqMux := scheduler.NewAsynqServer(cfg.RedisAddr, sched)
+	go func() {
+		if err := asynqSrv.Run(asynqMux); err != nil {
+			logger.Error("asynq worker stopped", "error", err)
+		}
+	}()
+	defer asynqSrv.Shutdown()
+
+	router := handler.NewRouterWithDeps(handler.RouterDeps{
+		Logger:      logger,
+		PGPinger:    pool,
+		ProjectRepo: projectRepo,
+		AssetRepo:   assetRepo,
+		JobHandler:  handler.NewJobHandler(jobRepo, sched),
+		SSEHandler:  handler.NewSSEHandler(jobRepo, broker),
+	})
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

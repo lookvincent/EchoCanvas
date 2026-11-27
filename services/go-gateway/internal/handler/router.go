@@ -8,19 +8,39 @@ import (
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/repository"
 )
 
-// NewRouter builds the Gin engine with middleware and v1 routes.
+// RouterDeps bundles handlers and dependencies for constructing the HTTP router.
+type RouterDeps struct {
+	Logger      *slog.Logger
+	PGPinger    Pinger
+	ProjectRepo repository.ProjectRepository
+	AssetRepo   repository.AssetRepository
+	JobHandler  *JobHandler
+	SSEHandler  *SSEHandler
+}
+
+// NewRouter builds the Gin engine for legacy Project/Asset routes.
 func NewRouter(
 	logger *slog.Logger,
 	pgPinger Pinger,
 	projectRepo repository.ProjectRepository,
 	assetRepo repository.AssetRepository,
 ) *gin.Engine {
-	r := gin.New()
-	r.Use(gin.Recovery(), middleware.Trace(logger))
+	return NewRouterWithDeps(RouterDeps{
+		Logger:      logger,
+		PGPinger:    pgPinger,
+		ProjectRepo: projectRepo,
+		AssetRepo:   assetRepo,
+	})
+}
 
-	health := NewHealthHandler(pgPinger)
-	projects := NewProjectHandler(projectRepo)
-	assets := NewAssetHandler(projectRepo, assetRepo)
+// NewRouterWithDeps builds the Gin engine with middleware and all configured route groups.
+func NewRouterWithDeps(deps RouterDeps) *gin.Engine {
+	r := gin.New()
+	r.Use(gin.Recovery(), middleware.Trace(deps.Logger))
+
+	health := NewHealthHandler(deps.PGPinger)
+	projects := NewProjectHandler(deps.ProjectRepo)
+	assets := NewAssetHandler(deps.ProjectRepo, deps.AssetRepo)
 
 	r.GET("/healthz", health.Check)
 
@@ -35,6 +55,15 @@ func NewRouter(
 		v1.GET("/projects/:id/assets", assets.ListByProject)
 		v1.POST("/projects/:id/assets", assets.Create)
 		v1.PUT("/assets/:assetId", assets.Update)
+
+		if deps.JobHandler != nil {
+			v1.POST("/projects/:id/jobs", deps.JobHandler.CreateJob)
+			v1.GET("/jobs/:jobId", deps.JobHandler.GetJob)
+			v1.POST("/frame-tasks/:taskId/retry", deps.JobHandler.RetryFrameTask)
+		}
+		if deps.SSEHandler != nil {
+			v1.GET("/jobs/:jobId/events", deps.SSEHandler.StreamJobEvents)
+		}
 	}
 
 	return r
