@@ -1,0 +1,269 @@
+{
+  "dataset_version": "1.0.0",
+  "description": "EchoCanvas 15-story benchmark suite evaluating Baseline vs Layered-Memory multi-frame consistency across 4 narrative stress categories (TDD section 7.2).",
+  "categories": [
+    "single_protagonist",
+    "dual_dialogue",
+    "prop_state_transition",
+    "lighting_weather_shift"
+  ],
+  "stories": [
+    {
+      "id": "S01",
+      "category": "single_protagonist",
+      "title": "2016 北京冬夜过街天桥",
+      "aspect_ratio": "16:9",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 4,
+      "raw_story": "2016年冬夜十一点，林深穿着黑色羊毛长风衣、系浅灰羊绒围巾站在北京过街天桥上。细雪飘落，他左手撑一把黑伞仰望深紫色夜空与桥下霓虹车流；远光灯掠过栏杆时他收起黑伞搭在手臂上低头看腕间银表；随后独自沿着结霜铁梯走下天桥，风衣下摆随寒风扬起；最后停在路灯暖光下，手握一只刻字银色随身酒壶回望桥面。",
+      "expected_entities": [
+        {"entity_key": "hero_linshen", "asset_type": "CHARACTER", "immutable_traits": ["black wool trench coat", "light grey scarf", "short black hair"]},
+        {"entity_key": "beijing_overpass", "asset_type": "SCENE", "immutable_traits": ["2016 Beijing winter overpass", "iron stairs", "neon traffic below"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Same protagonist black wool trench coat and grey scarf preserved"},
+        {"frame_index": 3, "rule": "Umbrella folded on arm while descending snowy iron stairs"}
+      ]
+    },
+    {
+      "id": "S02",
+      "category": "single_protagonist",
+      "title": "凌晨三点便利店窗边的琴盒少女",
+      "aspect_ratio": "16:9",
+      "style_preset": "warm_film_grain",
+      "target_frames": 4,
+      "raw_story": "凌晨三点，穿焦糖色灯芯绒外套、背黑色小提琴盒的女孩苏禾推开二十四小时便利店玻璃门。冷白荧光灯下她脱下毛线手套放在收银台边挑选热关东煮，胸前别着一枚银色银杏叶胸针；端着纸杯坐在临窗高脚凳上哈气暖手；玻璃窗倒映出她与街头橙色路灯，随后她拉好拉链背起琴盒走入微亮晨雾。",
+      "expected_entities": [
+        {"entity_key": "suhe", "asset_type": "CHARACTER", "immutable_traits": ["caramel corduroy jacket", "silver ginkgo brooch", "black violin case"]},
+        {"entity_key": "convenience_store", "asset_type": "SCENE", "immutable_traits": ["24h convenience store window", "high stools", "fluorescent night interior"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Silver ginkgo brooch visible on caramel corduroy lapel"},
+        {"frame_index": 4, "rule": "Black violin case back on shoulder when leaving into mist"}
+      ]
+    },
+    {
+      "id": "S03",
+      "category": "single_protagonist",
+      "title": "海边灯塔守望者的黄昏巡检",
+      "aspect_ratio": "16:9",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 4,
+      "raw_story": "暮色降临，穿藏青色粗针毛衣、左眼角有一道浅疤的老船员陈伯提着黄铜油灯走上石砌灯塔螺旋梯。他打开顶层玻璃灯室擦拭菲涅尔透镜，海风吹动斑白胡须；夜幕彻底合拢后，暖金色光束穿透海雾扫过礁石与白浪；清晨微曦时他靠在铸铁栏杆边，手中紧握铜灯静望远方货轮。",
+      "expected_entities": [
+        {"entity_key": "old_chen", "asset_type": "CHARACTER", "immutable_traits": ["navy knit sweater", "scar near left eye", "grey beard", "brass lantern"]},
+        {"entity_key": "coastal_lighthouse", "asset_type": "SCENE", "immutable_traits": ["stone spiral staircase", "cast-iron railing", "fresnel lens tower"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Navy sweater and left-eye scar match Frame 1"},
+        {"frame_index": 4, "rule": "Brass lantern held cleanly by railing"}
+      ]
+    },
+    {
+      "id": "S04",
+      "category": "single_protagonist",
+      "title": "末班绿皮火车站台的红色邮包",
+      "aspect_ratio": "9:16",
+      "style_preset": "warm_film_grain",
+      "target_frames": 4,
+      "raw_story": "北方小城老火车站飘着细雪，穿军绿色棉大衣、斜挎褪色帆布红邮包的青年顾城站在绿白指示牌下看纸质车票。蒸汽机车缓缓驶入月台，车头大灯在雪地上投出长影；他弯腰提起地上的旧棕色皮箱踏上车门踏板；隔着起雾的车窗玻璃，他指尖抹开水雾，窗外月台时钟定格在十一点五十。",
+      "expected_entities": [
+        {"entity_key": "gucheng", "asset_type": "CHARACTER", "immutable_traits": ["olive cotton parka", "faded red canvas mailbag", "brown leather suitcase"]},
+        {"entity_key": "snowy_platform", "asset_type": "SCENE", "immutable_traits": ["vintage train platform", "green-white station sign", "platform clock"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Faded red mailbag strap stays across olive parka shoulder"},
+        {"frame_index": 3, "rule": "Carrying brown leather suitcase up train steps"}
+      ]
+    },
+    {
+      "id": "S05",
+      "category": "dual_dialogue",
+      "title": "雨夜旧书店的最后一盏灯",
+      "aspect_ratio": "16:9",
+      "style_preset": "warm_film_grain",
+      "target_frames": 4,
+      "raw_story": "秋雨夜，戴铜框眼镜、穿深棕色灯芯绒马甲的书店店主老周在黄铜台灯下修补古籍。门铃响起，浑身微湿、背墨绿色帆布包的年轻女孩阿南收起透明折伞放入铜桶。老周递给她米白色棉毛巾和瓷杯热茶；两人围坐在堆满书册的胡桃木桌两侧，阿南摊开一页手写书签轻声交谈。",
+      "expected_entities": [
+        {"entity_key": "shopkeeper_zhou", "asset_type": "CHARACTER", "immutable_traits": ["brass-rimmed glasses", "dark brown corduroy vest", "white rolled shirtsleeves"]},
+        {"entity_key": "visitor_anan", "asset_type": "CHARACTER", "immutable_traits": ["olive canvas backpack", "beige knit cardigan", "short bob hair"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 3, "rule": "No outfit swap between Lao Zhou and A-Nan"},
+        {"frame_index": 4, "rule": "Teacup and cream towel remain on walnut table during dialogue"}
+      ]
+    },
+    {
+      "id": "S06",
+      "category": "dual_dialogue",
+      "title": "屋顶天文台的两个望远镜少年",
+      "aspect_ratio": "16:9",
+      "style_preset": "anime_cyber_noir",
+      "target_frames": 4,
+      "raw_story": "城市老公寓天台，穿亮黄色连帽衫的阿哲正蹲在蓝白折射望远镜旁拧校准旋钮，戴圆框黑眼镜的女生小满穿着深蓝牛仔外套手持星图手账本对照星座。阿哲起身示意小满俯身观测目镜；突然远处花火在城市天际线升起，两人肩并肩站在生锈水塔边仰望橙紫色夜空。",
+      "expected_entities": [
+        {"entity_key": "boy_azhe", "asset_type": "CHARACTER", "immutable_traits": ["bright yellow hoodie", "messy dark hair"]},
+        {"entity_key": "girl_xiaoman", "asset_type": "CHARACTER", "immutable_traits": ["round black glasses", "dark blue denim jacket", "star chart notebook"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 3, "rule": "Yellow hoodie remains on A-Zhe and denim jacket + glasses remain on Xiaoman"},
+        {"frame_index": 4, "rule": "Blue-white telescope stays visible beside water tower silhouette"}
+      ]
+    },
+    {
+      "id": "S07",
+      "category": "dual_dialogue",
+      "title": "修表匠铺子里的父子沉默谈判",
+      "aspect_ratio": "16:9",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 5,
+      "raw_story": "老城巷口的钟表铺内墙挂满木壳摆钟，老钟表匠佩戴单眼金属放大镜、穿灰色工作围裙坐在工作台后。穿剪裁合身黑色西装的儿子推门走进店里，将一只碎裂表蒙的金色怀表轻放在绿色绒面垫上；父亲沉默拿起镊子检查表芯齿轮；儿子拉开旧木椅坐下看着墙上摆钟，父亲将修好擦亮的怀表推回儿子手心。",
+      "expected_entities": [
+        {"entity_key": "father_watchmaker", "asset_type": "CHARACTER", "immutable_traits": ["grey work apron", "metal jeweler loupe", "silver hair"]},
+        {"entity_key": "son_visitor", "asset_type": "CHARACTER", "immutable_traits": ["tailored black suit", "white dress shirt"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 3, "rule": "Metal loupe over father's eye while inspecting gears"},
+        {"frame_index": 5, "rule": "Golden pocket watch rests intact on green velvet mat between father and son"}
+      ]
+    },
+    {
+      "id": "S08",
+      "category": "dual_dialogue",
+      "title": "美术馆闭馆前的临摹画师与保安",
+      "aspect_ratio": "1:1",
+      "style_preset": "watercolor_storybook",
+      "target_frames": 4,
+      "raw_story": "空旷的古典美术馆展厅，留齐肩卷发、穿沾有颜料的米色亚麻围裙的女画师架起木画架临摹油画。夕阳斜穿过天窗照在棋盘格大理石地上；穿深蓝色制服、别金属胸牌的年长保安轻步走近提醒闭馆时间，女子合上木质颜料箱微笑致意，两人一起走过金色画框长廊。",
+      "expected_entities": [
+        {"entity_key": "painter_woman", "asset_type": "CHARACTER", "immutable_traits": ["shoulder-length wavy hair", "paint-stained beige linen apron", "wooden palette"]},
+        {"entity_key": "gallery_guard", "asset_type": "CHARACTER", "immutable_traits": ["navy security uniform", "silver badge", "flashlight"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 3, "rule": "Paint-stained linen apron and navy guard uniform stay cleanly separated"},
+        {"frame_index": 4, "rule": "Wooden paint box carried closed alongside golden gallery corridor"}
+      ]
+    },
+    {
+      "id": "S09",
+      "category": "prop_state_transition",
+      "title": "暴雨中的折叠黑伞与湿透风衣",
+      "aspect_ratio": "16:9",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 5,
+      "raw_story": "傍晚乌云密布，穿全新干燥米色风衣的记者陆鸣撑开一把完好黑色折叠伞站在报刊亭前，此时地面完全干燥。暴雨骤至，狂风把黑伞吹翻折断一根伞骨，雨水开始打湿陆鸣风衣右肩。陆鸣索性收拢折断的黑伞扔进铁皮垃圾桶，迎着倾盆大雨奔跑穿过霓虹积水街道，浑身风衣湿透紧贴肩背喘息停在地铁口屋檐下。",
+      "expected_entities": [
+        {"entity_key": "reporter_luming", "asset_type": "CHARACTER", "immutable_traits": ["beige trench coat", "round wire glasses", "leather satchel"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 1, "rule": "Trench coat dry and black umbrella intact over dry pavement"},
+        {"frame_index": 2, "rule": "Broken umbrella rib and wet right coat shoulder in heavy rain"},
+        {"frame_index": 4, "rule": "NO umbrella in hands after discarding it in Frame 3; coat visibly drenched"}
+      ]
+    },
+    {
+      "id": "S10",
+      "category": "prop_state_transition",
+      "title": "壁炉边从封蜡信封到灰烬的秘信",
+      "aspect_ratio": "16:9",
+      "style_preset": "warm_film_grain",
+      "target_frames": 4,
+      "raw_story": "木屋书房壁炉跳动橙红火光，穿深紫天鹅绒长袍的老学者桌前放着一封盖有红色火漆印章的完整米色信封，旁边摆着黄铜拆信刀。学者用拆信刀挑破火漆读信，眉头紧锁；他起身将拆开的信纸靠近壁炉火焰边缘，纸角燃起明亮火舌；最后铜炭夹边只剩壁炉铁架上的一撮黑灰，桌面上原本放信封处空无一物。",
+      "expected_entities": [
+        {"entity_key": "scholar", "asset_type": "CHARACTER", "immutable_traits": ["deep purple velvet robe", "silver spectacles"]},
+        {"entity_key": "wax_letter", "asset_type": "SCENE", "immutable_traits": ["wooden desk", "brass letter opener", "stone fireplace"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 1, "rule": "Sealed cream envelope with intact red wax seal beside brass opener"},
+        {"frame_index": 3, "rule": "Open unfolded letter catching fireplace flame"},
+        {"frame_index": 4, "rule": "Black ash pile in hearth; envelope gone from desk"}
+      ]
+    },
+    {
+      "id": "S11",
+      "category": "prop_state_transition",
+      "title": "工作台上的陶瓷白杯碎裂与金缮修补",
+      "aspect_ratio": "1:1",
+      "style_preset": "warm_film_grain",
+      "target_frames": 5,
+      "raw_story": "阳光洒进极简陶艺工作室，穿靛蓝染色工装衬衫的陶艺师双手捧着一只洁白无瑕的素白手拉坯瓷碗放在原木桌上。工作猫突然跃上桌面撞翻瓷碗，瓷碗在木地板上裂成四块缺口；陶艺师戴起手指套用细毛笔沿着碎瓷拼缝涂抹亮金色大漆；最终瓷碗重归桌面中央，洁白釉面上清晰保留着蜿蜒闪耀的金色修补纹路。",
+      "expected_entities": [
+        {"entity_key": "potter", "asset_type": "CHARACTER", "immutable_traits": ["indigo workwear shirt", "tied-back hair"]},
+        {"entity_key": "ceramic_bowl", "asset_type": "SCENE", "immutable_traits": ["wooden workbench", "minimalist studio window"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 1, "rule": "Unblemished pure white ceramic bowl"},
+        {"frame_index": 3, "rule": "Four broken porcelain shards on timber floor"},
+        {"frame_index": 5, "rule": "Reassembled white bowl showing visible golden kintsugi seams"}
+      ]
+    },
+    {
+      "id": "S12",
+      "category": "prop_state_transition",
+      "title": "雪夜哨所交接的铜钥匙与防风怀表",
+      "aspect_ratio": "9:16",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 4,
+      "raw_story": "雪原木屋哨所外暴雪纷飞，穿毛领羊皮夹克的高大守林员左腰挂着一串大号铜钥匙，桌上停放着一只刻着雪松图案的银色怀表；门口响起叩门声，裹红色羊毛围巾的年轻女测绘员走进屋内抖落积雪；守林员解下左腰铜钥匙连同银怀表递入女测绘员双手；女测绘员佩戴好钥匙走出门外，背影消失在蓝调雪夜，而守林员原本空着桌面的木屋灯火渐暗。",
+      "expected_entities": [
+        {"entity_key": "ranger", "asset_type": "CHARACTER", "immutable_traits": ["shearling fur-collar jacket"]},
+        {"entity_key": "surveyor", "asset_type": "CHARACTER", "immutable_traits": ["red wool scarf", "dark down parka"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 1, "rule": "Brass keys on ranger belt and silver cedar pocket watch on wooden table"},
+        {"frame_index": 4, "rule": "Surveyor outside in red scarf wearing transferred brass keys"}
+      ]
+    },
+    {
+      "id": "S13",
+      "category": "lighting_weather_shift",
+      "title": "从正午烈日到蓝调夜雨的城市天台水箱",
+      "aspect_ratio": "16:9",
+      "style_preset": "photoreal_editorial",
+      "target_frames": 4,
+      "raw_story": "穿白T恤和卡其工装裤的摄影师阿凯站在同一座旧楼水泥天台角落（背景有一只涂鸦蓝色大水箱），正午白炽阳光投下锐利黑色短影；傍晚火烧云将整个蓝水箱与水泥地染成炽烈橘红色，长影拉过画面；深夜骤雨倾盆，冷青色霓虹看板与乌云压顶，阿凯披上一件黑色雨衣在反光水洼中擦拭相机镜头；破晓天青色薄雾升起，雨后水洼倒映微光。",
+      "expected_entities": [
+        {"entity_key": "photographer_akai", "asset_type": "CHARACTER", "immutable_traits": ["white t-shirt", "khaki cargo pants", "black DSLR camera"]},
+        {"entity_key": "rooftop_tank", "asset_type": "SCENE", "immutable_traits": ["graffiti blue rooftop water tank", "concrete parapet"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Exact same blue graffiti water tank geometry under orange sunset light"},
+        {"frame_index": 3, "rule": "Rain puddles and cool neon storm lighting replace dry sunset"}
+      ]
+    },
+    {
+      "id": "S14",
+      "category": "lighting_weather_shift",
+      "title": "停电公寓里的蜡烛微光与凌晨霓虹",
+      "aspect_ratio": "16:9",
+      "style_preset": "anime_cyber_noir",
+      "target_frames": 4,
+      "raw_story": "高楼落地窗客厅里，穿米白针织开衫、绑低马尾的女孩林夏坐在灰色沙发上用银色笔记本电脑工作，室内悬吊暖白吸顶灯；整栋楼突然全面停电陷入漆黑，只剩窗外城市暗红光影照出客厅轮廓；林夏点亮茶几上一根细长白蜡烛，单点暖橙烛光在墙面投出巨大摇曳人影；凌晨两点来电瞬间，冷色调吸顶灯与窗外青蓝广告牌霓虹同时恢复明亮。",
+      "expected_entities": [
+        {"entity_key": "linxia", "asset_type": "CHARACTER", "immutable_traits": ["cream knit cardigan", "low ponytail"]},
+        {"entity_key": "loft_living_room", "asset_type": "SCENE", "immutable_traits": ["grey fabric sofa", "floor-to-ceiling city window", "coffee table"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Same grey sofa and window geometry plunged into blackout silhouette"},
+        {"frame_index": 3, "rule": "Single warm candle shadow illumination from coffee table"}
+      ]
+    },
+    {
+      "id": "S15",
+      "category": "lighting_weather_shift",
+      "title": "雪山山口暴风雪过境至金色晨光",
+      "aspect_ratio": "16:9",
+      "style_preset": "cinematic_melancholy",
+      "target_frames": 4,
+      "raw_story": "海拔四千米的石标山口，穿亮橙色防风冲锋衣的登山客在白茫茫暴风雪与呼啸雪雾中紧紧拉着登山杖弓身前行；他钻进石壁避风凹处拉上拉链，狂雪在幽蓝冰暮里封锁视野；深夜暴雪停歇，深邃墨蓝星空与银河挂在漆黑锯齿雪峰上方，岩壁边橘红防风帐篷透出一点微光；黎明第一缕金色日照金山打亮整个山口与橙色冲锋衣背影。",
+      "expected_entities": [
+        {"entity_key": "mountaineer", "asset_type": "CHARACTER", "immutable_traits": ["bright orange hardshell jacket", "trekking poles", "climbing backpack"]},
+        {"entity_key": "mountain_pass", "asset_type": "SCENE", "immutable_traits": ["stone cairn mountain pass", "jagged snowy peaks"]}
+      ],
+      "continuity_checkpoints": [
+        {"frame_index": 2, "rule": "Same bright orange hardshell jacket preserved during blue twilight blizzard"},
+        {"frame_index": 4, "rule": "Same stone cairn pass bathed in golden alpine sunrise"}
+      ]
+    }
+  ]
+}
