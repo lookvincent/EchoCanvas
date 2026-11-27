@@ -24,6 +24,10 @@
 
 ## 三、 踩坑与经验追加区（按时间倒序追加）
 
+### [2026-11-27] [INFRA-01] 本地对象存储切换为 RustFS
+* **背景**：MinIO 官方镜像已从 Docker Hub / Quay 停止公开分发并归档，`minio/minio:latest` 与 `minio/mc:latest` 无法匿名拉取。
+* **决策**：本地对象存储统一切换为 Apache-2.0 开源 S3 兼容存储 **RustFS（`rustfs/rustfs:latest`）**，配合 `amazon/aws-cli:latest` 初始化默认 Bucket；环境变量从 `MINIO_*` 收敛为厂商无关的 `S3_*`（`S3_ENDPOINT`、`S3_REGION`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`、`S3_BUCKET`、`S3_USE_SSL`）。
+
 ### [2026-11-25] 初始化约定
 * **背景**：Windows PowerShell 默认控制台编码可能影响中文输出，`.workflow/scripts/workflow.py` 已在入口显式配置 UTF-8 重定向与显式文件编码。
 * **规范**：所有 Markdown 中的 Mermaid 节点标签避免使用 `<br/>` 等 HTML 标签，含特殊字符标签统一用双引号包裹。
