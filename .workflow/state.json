@@ -12,7 +12,7 @@
     "M3": "pending",
     "M4": "pending"
   },
-  "latest_handoff": ".workflow/handoffs/2026-11-25_001_init.md",
-  "updated_at": "2026-11-27T10:42:38+08:00",
+  "latest_handoff": ".workflow/handoffs/2026-11-27_001_handoff.md",
+  "updated_at": "2026-11-27T10:44:08+08:00",
   "updated_by": "antigravity/gemini"
 }
