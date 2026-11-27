@@ -18,6 +18,7 @@ type RouterDeps struct {
 	SSEHandler        *SSEHandler
 	GatewayHandler    *GatewayHandler
 	InternalAuthToken string
+	CORSAllowOrigins  string
 }
 
 // NewRouter builds the Gin engine for legacy Project/Asset routes.
@@ -38,7 +39,7 @@ func NewRouter(
 // NewRouterWithDeps builds the Gin engine with middleware and all configured route groups.
 func NewRouterWithDeps(deps RouterDeps) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery(), middleware.Trace(deps.Logger))
+	r.Use(gin.Recovery(), middleware.Trace(deps.Logger), middleware.CORS(deps.CORSAllowOrigins))
 
 	health := NewHealthHandler(deps.PGPinger)
 	projects := NewProjectHandler(deps.ProjectRepo)
@@ -60,7 +61,10 @@ func NewRouterWithDeps(deps RouterDeps) *gin.Engine {
 
 		if deps.JobHandler != nil {
 			v1.POST("/projects/:id/jobs", deps.JobHandler.CreateJob)
+			v1.GET("/projects/:id/jobs", deps.JobHandler.ListProjectJobs)
 			v1.GET("/jobs/:jobId", deps.JobHandler.GetJob)
+			v1.GET("/jobs/:jobId/states", deps.JobHandler.GetJobStates)
+			v1.POST("/jobs/:jobId/export", deps.JobHandler.ExportJob)
 			v1.POST("/jobs/:jobId/gates/:gateNo/confirm", deps.JobHandler.ConfirmGate)
 			v1.POST("/frames/:frameId/regenerate", deps.JobHandler.RegenerateFrame)
 			v1.PUT("/frames/:frameId/active-version", deps.JobHandler.SetActiveVersion)

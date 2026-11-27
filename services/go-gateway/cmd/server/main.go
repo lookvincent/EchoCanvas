@@ -82,15 +82,19 @@ func main() {
 	}()
 	defer asynqSrv.Shutdown()
 
+	jobHandler := handler.NewJobHandlerWithSidecar(jobRepo, sched, pyClient, usageRepo, broker)
+	jobHandler.SetExportDeps(projectRepo, assetRepo)
+
 	router := handler.NewRouterWithDeps(handler.RouterDeps{
 		Logger:            logger,
 		PGPinger:          pool,
 		ProjectRepo:       projectRepo,
 		AssetRepo:         assetRepo,
-		JobHandler:        handler.NewJobHandlerWithSidecar(jobRepo, sched, pyClient, usageRepo, broker),
+		JobHandler:        jobHandler,
 		SSEHandler:        handler.NewSSEHandler(jobRepo, broker),
 		GatewayHandler:    handler.NewGatewayHandler(gw, usageRepo, broker),
 		InternalAuthToken: cfg.InternalAuthToken,
+		CORSAllowOrigins:  cfg.CORSAllowOrigins,
 	})
 
 	srv := &http.Server{

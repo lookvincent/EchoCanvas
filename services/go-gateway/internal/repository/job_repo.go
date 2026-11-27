@@ -27,6 +27,8 @@ type JobRepository interface {
 	ListFramesByJob(ctx context.Context, jobID uuid.UUID) ([]model.StoryFrame, error)
 	ListVersionsByJob(ctx context.Context, jobID uuid.UUID) ([]model.FrameVersion, error)
 	ListTasksByJob(ctx context.Context, jobID uuid.UUID) ([]model.FrameTask, error)
+	ListJobsByProject(ctx context.Context, projectID uuid.UUID) ([]model.StoryJob, error)
+	ListEpisodicStatesByJob(ctx context.Context, jobID uuid.UUID) ([]model.EpisodicEntityState, error)
 	TransitionTaskStatus(ctx context.Context, taskID uuid.UUID, fromStatus, toStatus string, errCode, errDetail *string) (model.FrameTask, error)
 	IncrementTaskRetry(ctx context.Context, taskID uuid.UUID, toStatus string, errCode, errDetail *string) (model.FrameTask, error)
 	CheckAndFinalizeJobStatus(ctx context.Context, jobID uuid.UUID) (model.StoryJob, bool, error)
@@ -447,4 +449,51 @@ func (r *PostgresJobRepository) CheckAndFinalizeJobStatus(ctx context.Context, j
 		return model.StoryJob{}, false, err
 	}
 	return updated, true, nil
+}
+
+func (r *PostgresJobRepository) ListJobsByProject(ctx context.Context, projectID uuid.UUID) ([]model.StoryJob, error) {
+	const q = `
+		SELECT id, project_id, idempotency_key, langgraph_thread_id, trace_id, status, current_stage, budget_limit_usd, total_cost_usd, error_message, created_at, updated_at
+		FROM story_jobs
+		WHERE project_id = $1
+		ORDER BY created_at DESC
+		LIMIT 20`
+	rows, err := r.pool.Query(ctx, q, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.StoryJob, 0)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, j)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresJobRepository) ListEpisodicStatesByJob(ctx context.Context, jobID uuid.UUID) ([]model.EpisodicEntityState, error) {
+	const q = `
+		SELECT id, job_id, frame_index, entity_key, state_json, diff_from_prev, created_at
+		FROM episodic_entity_states
+		WHERE job_id = $1
+		ORDER BY frame_index ASC, entity_key ASC`
+	rows, err := r.pool.Query(ctx, q, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.EpisodicEntityState, 0)
+	for rows.Next() {
+		var s model.EpisodicEntityState
+		if err := rows.Scan(&s.ID, &s.JobID, &s.FrameIndex, &s.EntityKey, &s.StateJSON, &s.DiffFromPrev, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, s)
+	}
+	return items, rows.Err()
 }

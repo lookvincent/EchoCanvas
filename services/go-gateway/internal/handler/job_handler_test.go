@@ -224,6 +224,31 @@ func (r *fakeHandlerJobRepo) CheckAndFinalizeJobStatus(_ context.Context, jobID 
 	return j, false, nil
 }
 
+func (r *fakeHandlerJobRepo) ListJobsByProject(_ context.Context, projectID uuid.UUID) ([]model.StoryJob, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]model.StoryJob, 0)
+	for _, j := range r.jobs {
+		if j.ProjectID == projectID {
+			out = append(out, j)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (r *fakeHandlerJobRepo) ListEpisodicStatesByJob(_ context.Context, jobID uuid.UUID) ([]model.EpisodicEntityState, error) {
+	return []model.EpisodicEntityState{
+		{
+			ID:         uuid.New(),
+			JobID:      jobID,
+			FrameIndex: 1,
+			EntityKey:  "hero_linshen",
+			StateJSON:  json.RawMessage(`{"clothing_state":"dry shoulders","held_items":"open black umbrella"}`),
+		},
+	}, nil
+}
+
 type fakeSidecar struct {
 	resumeFn func(ctx context.Context, req client.ResumeWorkflowReq, traceID string) (client.ResumeWorkflowResp, error)
 	regenFn  func(ctx context.Context, frameID uuid.UUID, req client.RegenerateFrameReq, traceID string) (client.FrameVersionResp, error)
@@ -271,12 +296,15 @@ func setupJobTestRouterWithSidecar(sc SidecarCaller) (*gin.Engine, *fakeHandlerJ
 	enq := &spyEnqueuer{}
 	sched := scheduler.New(jRepo, enq, broker, nil, nil, 3, nil)
 	sseH := NewSSEHandler(jRepo, broker)
+	jh := NewJobHandlerWithSidecar(jRepo, sched, sc, usageRepo, broker)
+	jh.SetExportDeps(pRepo, aRepo)
 	r := NewRouterWithDeps(RouterDeps{
-		PGPinger:    fakePinger{},
-		ProjectRepo: pRepo,
-		AssetRepo:   aRepo,
-		JobHandler:  NewJobHandlerWithSidecar(jRepo, sched, sc, usageRepo, broker),
-		SSEHandler:  sseH,
+		PGPinger:         fakePinger{},
+		ProjectRepo:      pRepo,
+		AssetRepo:        aRepo,
+		JobHandler:       jh,
+		SSEHandler:       sseH,
+		CORSAllowOrigins: "http://localhost:3000",
 	})
 	return r, jRepo, broker, enq, sseH
 }
@@ -503,5 +531,84 @@ func TestSSEStream_ReplayLiveAndHeartbeat(t *testing.T) {
 	}
 	if !strings.Contains(body, ev2.ID) || !strings.Contains(body, model.EventFrameCompleted) || !strings.Contains(body, model.EventHeartbeat) {
 		t.Fatalf("expected replayed ev2, live frame_completed, and heartbeat; got body=%s", body)
+	}
+}
+
+func TestJobEndpoints_ListStatesExportAndCORS(t *testing.T) {
+	ctx := context.Background()
+	gin.SetMode(gin.TestMode)
+	pRepo := newFakeProjectRepo()
+	aRepo := newFakeAssetRepo()
+	jRepo := newFakeHandlerJobRepo()
+	usageRepo := newFakeHandlerUsageRepo()
+	broker := sse.NewMemoryBroker()
+	enq := &spyEnqueuer{}
+	sched := scheduler.New(jRepo, enq, broker, nil, nil, 3, nil)
+	jh := NewJobHandlerWithSidecar(jRepo, sched, nil, usageRepo, broker)
+	jh.SetExportDeps(pRepo, aRepo)
+
+	r := NewRouterWithDeps(RouterDeps{
+		PGPinger:         fakePinger{},
+		ProjectRepo:      pRepo,
+		AssetRepo:        aRepo,
+		JobHandler:       jh,
+		SSEHandler:       NewSSEHandler(jRepo, broker),
+		CORSAllowOrigins: "http://localhost:3000",
+	})
+
+	// CORS OPTIONS preflight -> 204 with Allow-Origin
+	wOpt := httptest.NewRecorder()
+	reqOpt := httptest.NewRequest(http.MethodOptions, "/api/v1/projects", nil)
+	reqOpt.Header.Set("Origin", "http://localhost:3000")
+	r.ServeHTTP(wOpt, reqOpt)
+	if wOpt.Code != http.StatusNoContent || wOpt.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Fatalf("unexpected CORS preflight: code=%d origin=%q", wOpt.Code, wOpt.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	pReq := model.CreateProjectRequest{Title: "Web Export Story", RawStory: "Overpass night scene."}
+	_ = pReq.NormalizeAndValidate()
+	proj, _ := pRepo.Create(ctx, pReq)
+	job, _, _ := jRepo.CreateOrGetByIdempotencyKey(ctx, proj.ID, "web-k1", "th_web", "tr_web", 1.0)
+	frame, _ := jRepo.CreateFrame(ctx, job.ID, 1, json.RawMessage(`{"shot_type":"Wide","camera_angle":"Eye","action":"Stand","dialogue":"Hello"}`))
+	assetReq := model.CreateAssetRequest{
+		AssetType:   "CHARACTER",
+		EntityKey:   "hero",
+		DisplayName: "Hero",
+		ProfileJSON: json.RawMessage(`{"coat":"black"}`),
+	}
+	_ = assetReq.NormalizeAndValidate()
+	_, _ = aRepo.Create(ctx, proj.ID, assetReq)
+
+	// GET /projects/:id/jobs
+	wList := httptest.NewRecorder()
+	r.ServeHTTP(wList, httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+proj.ID.String()+"/jobs", nil))
+	if wList.Code != http.StatusOK || !strings.Contains(wList.Body.String(), job.ID.String()) {
+		t.Fatalf("unexpected ListProjectJobs response: code=%d body=%s", wList.Code, wList.Body.String())
+	}
+
+	// GET /jobs/:jobId/states
+	wStates := httptest.NewRecorder()
+	r.ServeHTTP(wStates, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID.String()+"/states", nil))
+	if wStates.Code != http.StatusOK || !strings.Contains(wStates.Body.String(), "hero_linshen") {
+		t.Fatalf("unexpected GetJobStates response: code=%d body=%s", wStates.Code, wStates.Body.String())
+	}
+
+	// POST /jobs/:jobId/export
+	wExp := httptest.NewRecorder()
+	reqExp := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID.String()+"/export", bytes.NewBufferString(`{"format":"markdown_json"}`))
+	reqExp.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(wExp, reqExp)
+	if wExp.Code != http.StatusOK {
+		t.Fatalf("expected 200 export, got %d body=%s", wExp.Code, wExp.Body.String())
+	}
+	var expResp struct {
+		Data model.ExportJobResponse `json:"data"`
+	}
+	_ = json.Unmarshal(wExp.Body.Bytes(), &expResp)
+	if !strings.Contains(expResp.Data.Markdown, "Web Export Story") || !strings.Contains(expResp.Data.Markdown, "Frame 01") {
+		t.Fatalf("unexpected export markdown: %s", expResp.Data.Markdown)
+	}
+	if expResp.Data.JobID != job.ID || frame.ID == uuid.Nil {
+		t.Fatalf("invalid export job id")
 	}
 }

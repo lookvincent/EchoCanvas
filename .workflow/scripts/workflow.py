@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -232,8 +233,13 @@ def resolve_python_cmd(cmd: list[str], cwd: Path) -> list[str]:
 
 def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> tuple[bool, str]:
     try:
+        resolved = list(cmd)
+        if resolved:
+            found = shutil.which(resolved[0])
+            if found:
+                resolved[0] = found
         proc = subprocess.run(
-            cmd,
+            resolved,
             cwd=str(cwd),
             env=env,
             capture_output=True,

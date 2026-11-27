@@ -231,6 +231,22 @@ func (r *memJobRepo) CheckAndFinalizeJobStatus(_ context.Context, jobID uuid.UUI
 	return j, false, nil
 }
 
+func (r *memJobRepo) ListJobsByProject(_ context.Context, projectID uuid.UUID) ([]model.StoryJob, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]model.StoryJob, 0)
+	for _, j := range r.jobs {
+		if j.ProjectID == projectID {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
+func (r *memJobRepo) ListEpisodicStatesByJob(_ context.Context, _ uuid.UUID) ([]model.EpisodicEntityState, error) {
+	return []model.EpisodicEntityState{}, nil
+}
+
 type mockEnqueuer struct {
 	mu           sync.Mutex
 	storyCalls   []StoryParsePayload

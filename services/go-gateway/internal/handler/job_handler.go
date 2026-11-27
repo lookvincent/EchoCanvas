@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -26,11 +28,13 @@ type SidecarCaller interface {
 
 // JobHandler handles story job creation, status aggregation, HITL gates, and task retries.
 type JobHandler struct {
-	jobRepo   repository.JobRepository
-	sched     *scheduler.Scheduler
-	sidecar   SidecarCaller
-	usageRepo repository.UsageRepository
-	broker    sse.Broker
+	jobRepo     repository.JobRepository
+	sched       *scheduler.Scheduler
+	sidecar     SidecarCaller
+	usageRepo   repository.UsageRepository
+	broker      sse.Broker
+	projectRepo repository.ProjectRepository
+	assetRepo   repository.AssetRepository
 }
 
 // NewJobHandler constructs a JobHandler without sidecar dependencies.
@@ -53,6 +57,12 @@ func NewJobHandlerWithSidecar(
 		usageRepo: usageRepo,
 		broker:    broker,
 	}
+}
+
+// SetExportDeps attaches optional project and asset repositories for job listing and export endpoints.
+func (h *JobHandler) SetExportDeps(projectRepo repository.ProjectRepository, assetRepo repository.AssetRepository) {
+	h.projectRepo = projectRepo
+	h.assetRepo = assetRepo
 }
 
 // CreateJob handles POST /api/v1/projects/:id/jobs with mandatory X-Idempotency-Key.
@@ -490,4 +500,183 @@ func respondSidecarError(c *gin.Context, err error) {
 	default:
 		response.Fail(c, http.StatusBadGateway, response.CodeUpstreamError, err.Error())
 	}
+}
+
+// ListProjectJobs handles GET /api/v1/projects/:id/jobs.
+func (h *JobHandler) ListProjectJobs(c *gin.Context) {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "invalid project id")
+		return
+	}
+	if h.projectRepo != nil {
+		if _, err := h.projectRepo.GetByID(c.Request.Context(), projectID); errors.Is(err, repository.ErrNotFound) {
+			response.Fail(c, http.StatusNotFound, response.CodeNotFound, "project not found")
+			return
+		} else if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternal, "failed to verify project")
+			return
+		}
+	}
+	jobs, err := h.jobRepo.ListJobsByProject(c.Request.Context(), projectID)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeInternal, "failed to list project jobs")
+		return
+	}
+	response.OK(c, gin.H{"items": jobs})
+}
+
+// GetJobStates handles GET /api/v1/jobs/:jobId/states (FR-C04 continuity snapshots).
+func (h *JobHandler) GetJobStates(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("jobId"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "invalid job id")
+		return
+	}
+	if _, err := h.jobRepo.GetJobByID(c.Request.Context(), jobID); errors.Is(err, repository.ErrNotFound) {
+		response.Fail(c, http.StatusNotFound, response.CodeNotFound, "job not found")
+		return
+	} else if err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeInternal, "failed to load job")
+		return
+	}
+	states, err := h.jobRepo.ListEpisodicStatesByJob(c.Request.Context(), jobID)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeInternal, "failed to list episodic states")
+		return
+	}
+	response.OK(c, gin.H{"items": states})
+}
+
+// ExportJob handles POST /api/v1/jobs/:jobId/export (FR-G01 / FR-G02 storyboard export bundle).
+func (h *JobHandler) ExportJob(c *gin.Context) {
+	jobID, err := uuid.Parse(c.Param("jobId"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "invalid job id")
+		return
+	}
+	var req model.ExportJobRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "invalid JSON payload")
+		return
+	}
+	format := strings.TrimSpace(req.Format)
+	if format == "" {
+		format = "markdown_json"
+	}
+	if format != "markdown_json" && format != "long_strip_manifest" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "format must be markdown_json or long_strip_manifest")
+		return
+	}
+
+	ctx := c.Request.Context()
+	detail, err := h.buildJobDetail(c, jobID)
+	if errors.Is(err, repository.ErrNotFound) {
+		response.Fail(c, http.StatusNotFound, response.CodeNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, response.CodeInternal, "failed to load job for export")
+		return
+	}
+
+	projectTitle := "EchoCanvas Storyboard"
+	var projectMeta *model.Project
+	if h.projectRepo != nil {
+		if proj, pErr := h.projectRepo.GetByID(ctx, detail.Job.ProjectID); pErr == nil {
+			projectTitle = proj.Title
+			projectMeta = &proj
+		}
+	}
+	var assets []model.AssetStyleProfile
+	if h.assetRepo != nil {
+		if aList, aErr := h.assetRepo.ListByProject(ctx, detail.Job.ProjectID); aErr == nil {
+			assets = aList
+		}
+	}
+	states, _ := h.jobRepo.ListEpisodicStatesByJob(ctx, jobID)
+
+	verByID := make(map[uuid.UUID]model.FrameVersion, len(detail.Versions))
+	latestByFrame := make(map[uuid.UUID]model.FrameVersion, len(detail.Frames))
+	for _, v := range detail.Versions {
+		verByID[v.ID] = v
+		latestByFrame[v.FrameID] = v
+	}
+
+	var md strings.Builder
+	md.WriteString(fmt.Sprintf("# %s\n\n", projectTitle))
+	md.WriteString(fmt.Sprintf("- **Job ID**: `%s`\n", detail.Job.ID))
+	md.WriteString(fmt.Sprintf("- **Trace ID**: `%s`\n", detail.Job.TraceID))
+	md.WriteString(fmt.Sprintf("- **Stage / Status**: `%s / %s`\n", detail.Job.CurrentStage, detail.Job.Status))
+	md.WriteString(fmt.Sprintf("- **Total Cost (USD)**: `$%.6f`\n\n", detail.Job.TotalCostUSD))
+
+	if len(assets) > 0 {
+		md.WriteString("## Locked & Extracted Assets\n\n")
+		for _, a := range assets {
+			md.WriteString(fmt.Sprintf("- **%s** (`%s`, `%s`, source=`%s`)\n", a.DisplayName, a.AssetType, a.EntityKey, a.Source))
+		}
+		md.WriteString("\n")
+	}
+
+	exportFrames := make([]map[string]any, 0, len(detail.Frames))
+	md.WriteString("## Storyboard Frames\n\n")
+	for _, f := range detail.Frames {
+		var active *model.FrameVersion
+		if f.ActiveVersionID != nil {
+			if found, ok := verByID[*f.ActiveVersionID]; ok {
+				active = &found
+			}
+		}
+		if active == nil {
+			if latest, ok := latestByFrame[f.ID]; ok {
+				active = &latest
+			}
+		}
+
+		var scriptMap map[string]any
+		_ = json.Unmarshal(f.ScriptJSON, &scriptMap)
+
+		entry := map[string]any{
+			"frame_id":    f.ID,
+			"frame_index": f.FrameIndex,
+			"script":      scriptMap,
+		}
+		md.WriteString(fmt.Sprintf("### Frame %02d\n\n", f.FrameIndex))
+		if scriptMap != nil {
+			md.WriteString(fmt.Sprintf("- **Shot / Angle**: %v / %v\n", scriptMap["shot_type"], scriptMap["camera_angle"]))
+			md.WriteString(fmt.Sprintf("- **Action**: %v\n", scriptMap["action"]))
+			if d, ok := scriptMap["dialogue"]; ok && fmt.Sprintf("%v", d) != "" {
+				md.WriteString(fmt.Sprintf("- **Dialogue**: %v\n", d))
+			}
+		}
+		if active != nil {
+			entry["active_version"] = active
+			md.WriteString(fmt.Sprintf("- **Active Version**: v%d\n", active.VersionNo))
+			md.WriteString(fmt.Sprintf("- **Image URL**: %s\n", active.ImageURL))
+			if active.VLMScore != nil {
+				md.WriteString(fmt.Sprintf("- **VLM QA Score**: %.2f\n", *active.VLMScore))
+			}
+		}
+		md.WriteString("\n")
+		exportFrames = append(exportFrames, entry)
+	}
+
+	manifest := map[string]any{
+		"project":         projectMeta,
+		"job":             detail.Job,
+		"assets":          assets,
+		"frames":          exportFrames,
+		"episodic_states": states,
+		"total_cost_usd":  detail.Job.TotalCostUSD,
+	}
+
+	response.OK(c, model.ExportJobResponse{
+		JobID:        detail.Job.ID,
+		ProjectTitle: projectTitle,
+		Format:       format,
+		Filename:     fmt.Sprintf("echocanvas_%s_export.json", detail.Job.ID.String()[:8]),
+		Markdown:     md.String(),
+		Manifest:     manifest,
+		TotalCostUSD: detail.Job.TotalCostUSD,
+	})
 }

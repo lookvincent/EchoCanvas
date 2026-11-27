@@ -166,3 +166,30 @@ type RegenerateFrameResponse struct {
 	Version              FrameVersion `json:"version"`
 	CascadedFrameIndices []int        `json:"cascaded_frame_indices"`
 }
+
+// EpisodicEntityState maps to episodic_entity_states.
+type EpisodicEntityState struct {
+	ID           uuid.UUID       `json:"id"`
+	JobID        uuid.UUID       `json:"job_id"`
+	FrameIndex   int             `json:"frame_index"`
+	EntityKey    string          `json:"entity_key"`
+	StateJSON    json.RawMessage `json:"state_json"`
+	DiffFromPrev json.RawMessage `json:"diff_from_prev,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+// ExportJobRequest defines payload for POST /api/v1/jobs/:jobId/export.
+type ExportJobRequest struct {
+	Format string `json:"format,omitempty"`
+}
+
+// ExportJobResponse returns structured script Markdown and manifest JSON for FR-G01/FR-G02.
+type ExportJobResponse struct {
+	JobID        uuid.UUID      `json:"job_id"`
+	ProjectTitle string         `json:"project_title"`
+	Format       string         `json:"format"`
+	Filename     string         `json:"filename"`
+	Markdown     string         `json:"markdown"`
+	Manifest     map[string]any `json:"manifest"`
+	TotalCostUSD float64        `json:"total_cost_usd"`
+}

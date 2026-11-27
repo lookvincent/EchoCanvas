@@ -20,6 +20,7 @@ type ProviderEndpoint struct {
 type Config struct {
 	Port                      string
 	PySidecarURL              string
+	CORSAllowOrigins          string
 	DatabaseURL               string
 	RedisAddr                 string
 	InternalAuthToken         string
@@ -45,6 +46,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Port:              getEnvOrDefault("GO_GATEWAY_PORT", "8080"),
 		PySidecarURL:      getEnvOrDefault("PY_SIDECAR_URL", "http://localhost:8001"),
+		CORSAllowOrigins:  getEnvOrDefault("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
 		DatabaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		RedisAddr:         getEnvOrDefault("REDIS_ADDR", "localhost:6379"),
 		InternalAuthToken: strings.TrimSpace(os.Getenv("INTERNAL_AUTH_TOKEN")),
