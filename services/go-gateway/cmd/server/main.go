@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/config"
+	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/gateway"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/handler"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/repository"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/scheduler"
@@ -57,8 +58,10 @@ func main() {
 	projectRepo := repository.NewPostgresProjectRepository(pool)
 	assetRepo := repository.NewPostgresAssetRepository(pool)
 	jobRepo := repository.NewPostgresJobRepository(pool)
+	usageRepo := repository.NewPostgresUsageRepository(pool)
 	broker := sse.NewRedisBroker(rdb)
-	sched := scheduler.New(jobRepo, scheduler.NewAsynqEnqueuer(asynqClient), broker, nil, nil, 3, logger)
+	sched := scheduler.New(jobRepo, scheduler.NewAsynqEnqueuer(asynqClient), broker, nil, nil, cfg.MaxConcurrentVision, logger)
+	gw := gateway.New(usageRepo, broker, cfg, gateway.Options{Logger: logger})
 
 	asynqSrv, asynqMux := scheduler.NewAsynqServer(cfg.RedisAddr, sched)
 	go func() {
@@ -69,12 +72,14 @@ func main() {
 	defer asynqSrv.Shutdown()
 
 	router := handler.NewRouterWithDeps(handler.RouterDeps{
-		Logger:      logger,
-		PGPinger:    pool,
-		ProjectRepo: projectRepo,
-		AssetRepo:   assetRepo,
-		JobHandler:  handler.NewJobHandler(jobRepo, sched),
-		SSEHandler:  handler.NewSSEHandler(jobRepo, broker),
+		Logger:            logger,
+		PGPinger:          pool,
+		ProjectRepo:       projectRepo,
+		AssetRepo:         assetRepo,
+		JobHandler:        handler.NewJobHandler(jobRepo, sched),
+		SSEHandler:        handler.NewSSEHandler(jobRepo, broker),
+		GatewayHandler:    handler.NewGatewayHandler(gw, usageRepo, broker),
+		InternalAuthToken: cfg.InternalAuthToken,
 	})
 
 	srv := &http.Server{

@@ -8,6 +8,7 @@ require (
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/redis/go-redis/v9 v9.24.0
+	golang.org/x/time v0.16.0
 )
 
 require (
@@ -47,6 +48,5 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )

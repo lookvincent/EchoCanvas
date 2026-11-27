@@ -10,12 +10,14 @@ import (
 
 // RouterDeps bundles handlers and dependencies for constructing the HTTP router.
 type RouterDeps struct {
-	Logger      *slog.Logger
-	PGPinger    Pinger
-	ProjectRepo repository.ProjectRepository
-	AssetRepo   repository.AssetRepository
-	JobHandler  *JobHandler
-	SSEHandler  *SSEHandler
+	Logger            *slog.Logger
+	PGPinger          Pinger
+	ProjectRepo       repository.ProjectRepository
+	AssetRepo         repository.AssetRepository
+	JobHandler        *JobHandler
+	SSEHandler        *SSEHandler
+	GatewayHandler    *GatewayHandler
+	InternalAuthToken string
 }
 
 // NewRouter builds the Gin engine for legacy Project/Asset routes.
@@ -63,6 +65,19 @@ func NewRouterWithDeps(deps RouterDeps) *gin.Engine {
 		}
 		if deps.SSEHandler != nil {
 			v1.GET("/jobs/:jobId/events", deps.SSEHandler.StreamJobEvents)
+		}
+		if deps.GatewayHandler != nil {
+			v1.GET("/jobs/:jobId/usage", deps.GatewayHandler.GetJobUsage)
+			v1.POST("/jobs/:jobId/budget/approve", deps.GatewayHandler.ApproveBudget)
+		}
+	}
+
+	if deps.GatewayHandler != nil {
+		proxy := r.Group("/proxy/v1")
+		proxy.Use(middleware.InternalAuth(deps.InternalAuthToken))
+		{
+			proxy.POST("/chat/completions", deps.GatewayHandler.ProxyChatCompletions)
+			proxy.POST("/images/generations", deps.GatewayHandler.ProxyImageGenerations)
 		}
 	}
 

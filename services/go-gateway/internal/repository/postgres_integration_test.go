@@ -214,3 +214,81 @@ func TestPostgresIntegration_JobIdempotencyAndOptimisticLock(t *testing.T) {
 		t.Fatalf("IncrementTaskRetry failed: %+v err=%v", retried, err)
 	}
 }
+
+func TestPostgresIntegration_UsageLedgerAndBudget(t *testing.T) {
+	projRepo, _, cleanupPool := openIntegrationPool(t)
+	defer cleanupPool()
+
+	cfg, _ := config.Load()
+	ctx := context.Background()
+	pool, err := NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("connect pool: %v", err)
+	}
+	defer pool.Close()
+
+	jobRepo := NewPostgresJobRepository(pool)
+	usageRepo := NewPostgresUsageRepository(pool)
+
+	pReq := model.CreateProjectRequest{Title: "Usage Ledger Test", RawStory: "Budget integration test"}
+	_ = pReq.NormalizeAndValidate()
+	proj, err := projRepo.Create(ctx, pReq)
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	t.Cleanup(func() { _ = projRepo.Delete(context.Background(), proj.ID) })
+
+	job, _, err := jobRepo.CreateOrGetByIdempotencyKey(ctx, proj.ID, "pg-usage-"+uuid.NewString(), "th_"+uuid.NewString(), "tr_usage", 0.10)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	_, total1, err := usageRepo.RecordUsage(ctx, model.UsageLedgerEntry{
+		JobID:        job.ID,
+		TraceID:      "tr_usage_1",
+		Provider:     "deepseek",
+		Model:        "deepseek-chat",
+		CallType:     model.CallTypeLLMText,
+		InputTokens:  1000,
+		OutputTokens: 500,
+		LatencyMS:    120,
+		CostUSD:      0.03,
+		IsFallback:   false,
+	})
+	if err != nil || total1 < 0.029 {
+		t.Fatalf("record usage 1 failed: total=%v err=%v", total1, err)
+	}
+
+	_, total2, err := usageRepo.RecordUsage(ctx, model.UsageLedgerEntry{
+		JobID:      job.ID,
+		TraceID:    "tr_usage_2",
+		Provider:   "siliconflow",
+		Model:      "flux-dev",
+		CallType:   model.CallTypeImageGen,
+		ImageCount: 1,
+		LatencyMS:  850,
+		CostUSD:    0.04,
+		IsFallback: true,
+	})
+	if err != nil || total2 < 0.069 {
+		t.Fatalf("record usage 2 failed: total=%v err=%v", total2, err)
+	}
+
+	if err := usageRepo.MarkJobPausedBudget(ctx, job.ID); err != nil {
+		t.Fatalf("mark paused budget: %v", err)
+	}
+
+	if _, err := usageRepo.ApproveJobBudget(ctx, job.ID, 0.05); !errors.Is(err, ErrBudgetTooLow) {
+		t.Fatalf("expected ErrBudgetTooLow when approving below total cost, got %v", err)
+	}
+
+	approved, err := usageRepo.ApproveJobBudget(ctx, job.ID, 0.50)
+	if err != nil || approved.Status != model.JobStatusRunning || approved.BudgetLimitUSD != 0.50 {
+		t.Fatalf("approve job budget failed: %+v err=%v", approved, err)
+	}
+
+	summary, err := usageRepo.GetJobUsageSummary(ctx, job.ID)
+	if err != nil || len(summary.Entries) != 2 || len(summary.Breakdown) != 2 {
+		t.Fatalf("expected 2 entries and 2 breakdown rows, got %+v err=%v", summary, err)
+	}
+}
