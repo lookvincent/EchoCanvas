@@ -61,6 +61,9 @@ func NewRouterWithDeps(deps RouterDeps) *gin.Engine {
 		if deps.JobHandler != nil {
 			v1.POST("/projects/:id/jobs", deps.JobHandler.CreateJob)
 			v1.GET("/jobs/:jobId", deps.JobHandler.GetJob)
+			v1.POST("/jobs/:jobId/gates/:gateNo/confirm", deps.JobHandler.ConfirmGate)
+			v1.POST("/frames/:frameId/regenerate", deps.JobHandler.RegenerateFrame)
+			v1.PUT("/frames/:frameId/active-version", deps.JobHandler.SetActiveVersion)
 			v1.POST("/frame-tasks/:taskId/retry", deps.JobHandler.RetryFrameTask)
 		}
 		if deps.SSEHandler != nil {

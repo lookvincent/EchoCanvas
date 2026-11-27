@@ -142,3 +142,27 @@ type SSEEvent struct {
 	Data      json.RawMessage `json:"data"`
 	CreatedAt time.Time       `json:"created_at"`
 }
+
+// ConfirmGateRequest defines payload for POST /api/v1/jobs/:jobId/gates/:gateNo/confirm.
+type ConfirmGateRequest struct {
+	UserEdits map[string]any `json:"user_edits,omitempty"`
+}
+
+// RegenerateFrameRequest defines payload for POST /api/v1/frames/:frameId/regenerate.
+type RegenerateFrameRequest struct {
+	UserEditNote      string `json:"user_edit_note"`
+	CascadeDownstream bool   `json:"cascade_downstream,omitempty"`
+	Seed              *int64 `json:"seed,omitempty"`
+}
+
+// SetActiveVersionRequest defines payload for PUT /api/v1/frames/:frameId/active-version.
+type SetActiveVersionRequest struct {
+	VersionID uuid.UUID `json:"version_id"`
+}
+
+// RegenerateFrameResponse wraps task, created version, and cascaded downstream frame indices.
+type RegenerateFrameResponse struct {
+	Task                 FrameTask    `json:"task"`
+	Version              FrameVersion `json:"version"`
+	CascadedFrameIndices []int        `json:"cascaded_frame_indices"`
+}

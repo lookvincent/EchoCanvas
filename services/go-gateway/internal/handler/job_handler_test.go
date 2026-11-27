@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/client"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/model"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/repository"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/response"
@@ -101,6 +103,45 @@ func (r *fakeHandlerJobRepo) CreateFrame(_ context.Context, jobID uuid.UUID, idx
 	return f, nil
 }
 
+func (r *fakeHandlerJobRepo) GetFrameByID(_ context.Context, frameID uuid.UUID) (model.StoryFrame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, ok := r.frames[frameID]
+	if !ok {
+		return model.StoryFrame{}, repository.ErrNotFound
+	}
+	return f, nil
+}
+
+func (r *fakeHandlerJobRepo) SetFrameActiveVersion(_ context.Context, frameID, versionID uuid.UUID) (model.StoryFrame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, ok := r.frames[frameID]
+	if !ok {
+		return model.StoryFrame{}, repository.ErrNotFound
+	}
+	v, ok := r.versions[versionID]
+	if !ok || v.FrameID != frameID {
+		return model.StoryFrame{}, repository.ErrNotFound
+	}
+	f.ActiveVersionID = &versionID
+	r.frames[frameID] = f
+	return f, nil
+}
+
+func (r *fakeHandlerJobRepo) ListFrameVersions(_ context.Context, frameID uuid.UUID) ([]model.FrameVersion, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]model.FrameVersion, 0)
+	for _, v := range r.versions {
+		if v.FrameID == frameID {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VersionNo < out[j].VersionNo })
+	return out, nil
+}
+
 func (r *fakeHandlerJobRepo) CreateFrameTask(_ context.Context, jobID, frameID uuid.UUID, taskType string, maxRetries int) (model.FrameTask, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -128,6 +169,7 @@ func (r *fakeHandlerJobRepo) ListFramesByJob(_ context.Context, jobID uuid.UUID)
 			out = append(out, f)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FrameIndex < out[j].FrameIndex })
 	return out, nil
 }
 
@@ -172,6 +214,29 @@ func (r *fakeHandlerJobRepo) IncrementTaskRetry(_ context.Context, taskID uuid.U
 	return t, nil
 }
 
+func (r *fakeHandlerJobRepo) CheckAndFinalizeJobStatus(_ context.Context, jobID uuid.UUID) (model.StoryJob, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.jobs[jobID]
+	if !ok {
+		return model.StoryJob{}, false, repository.ErrNotFound
+	}
+	return j, false, nil
+}
+
+type fakeSidecar struct {
+	resumeFn func(ctx context.Context, req client.ResumeWorkflowReq, traceID string) (client.ResumeWorkflowResp, error)
+	regenFn  func(ctx context.Context, frameID uuid.UUID, req client.RegenerateFrameReq, traceID string) (client.FrameVersionResp, error)
+}
+
+func (f *fakeSidecar) ResumeWorkflow(ctx context.Context, req client.ResumeWorkflowReq, traceID string) (client.ResumeWorkflowResp, error) {
+	return f.resumeFn(ctx, req, traceID)
+}
+
+func (f *fakeSidecar) RegenerateFrame(ctx context.Context, frameID uuid.UUID, req client.RegenerateFrameReq, traceID string) (client.FrameVersionResp, error) {
+	return f.regenFn(ctx, frameID, req, traceID)
+}
+
 type spyEnqueuer struct {
 	mu          sync.Mutex
 	storyCount  int
@@ -193,10 +258,15 @@ func (s *spyEnqueuer) EnqueueFrameRender(_ context.Context, _ scheduler.FrameRen
 }
 
 func setupJobTestRouter() (*gin.Engine, *fakeHandlerJobRepo, *sse.MemoryBroker, *spyEnqueuer, *SSEHandler) {
+	return setupJobTestRouterWithSidecar(nil)
+}
+
+func setupJobTestRouterWithSidecar(sc SidecarCaller) (*gin.Engine, *fakeHandlerJobRepo, *sse.MemoryBroker, *spyEnqueuer, *SSEHandler) {
 	gin.SetMode(gin.TestMode)
 	pRepo := newFakeProjectRepo()
 	aRepo := newFakeAssetRepo()
 	jRepo := newFakeHandlerJobRepo()
+	usageRepo := newFakeHandlerUsageRepo()
 	broker := sse.NewMemoryBroker()
 	enq := &spyEnqueuer{}
 	sched := scheduler.New(jRepo, enq, broker, nil, nil, 3, nil)
@@ -205,7 +275,7 @@ func setupJobTestRouter() (*gin.Engine, *fakeHandlerJobRepo, *sse.MemoryBroker, 
 		PGPinger:    fakePinger{},
 		ProjectRepo: pRepo,
 		AssetRepo:   aRepo,
-		JobHandler:  NewJobHandler(jRepo, sched),
+		JobHandler:  NewJobHandlerWithSidecar(jRepo, sched, sc, usageRepo, broker),
 		SSEHandler:  sseH,
 	})
 	return r, jRepo, broker, enq, sseH
@@ -216,14 +286,12 @@ func TestJobEndpoints_IdempotencyAndRetry(t *testing.T) {
 	projID := uuid.New()
 	otherProjID := uuid.New()
 
-	// Missing X-Idempotency-Key -> 40001
 	wMissing := httptest.NewRecorder()
 	r.ServeHTTP(wMissing, httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projID.String()+"/jobs", nil))
 	if wMissing.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 when missing idempotency key, got %d", wMissing.Code)
 	}
 
-	// First create -> 201 and 1 enqueue
 	w1 := httptest.NewRecorder()
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projID.String()+"/jobs", bytes.NewBufferString(`{"budget_limit_usd":1.25}`))
 	req1.Header.Set("Content-Type", "application/json")
@@ -237,7 +305,6 @@ func TestJobEndpoints_IdempotencyAndRetry(t *testing.T) {
 	}
 	_ = json.Unmarshal(w1.Body.Bytes(), &resp1)
 
-	// Duplicate submit with same key -> 200, same job, still 1 enqueue total
 	w2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projID.String()+"/jobs", bytes.NewBufferString(`{"budget_limit_usd":1.25}`))
 	req2.Header.Set("Content-Type", "application/json")
@@ -254,7 +321,6 @@ func TestJobEndpoints_IdempotencyAndRetry(t *testing.T) {
 		t.Fatalf("idempotency failed: job1=%s job2=%s enqueues=%d", resp1.Data.ID, resp2.Data.ID, enq.storyCount)
 	}
 
-	// Same key on different project -> 40901
 	wConflict := httptest.NewRecorder()
 	reqConflict := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+otherProjID.String()+"/jobs", nil)
 	reqConflict.Header.Set("X-Idempotency-Key", "idem-001")
@@ -268,14 +334,12 @@ func TestJobEndpoints_IdempotencyAndRetry(t *testing.T) {
 		t.Fatalf("expected error code %d, got %d", response.CodeConflict, envErr.Code)
 	}
 
-	// Get job detail -> 200
 	wGet := httptest.NewRecorder()
 	r.ServeHTTP(wGet, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+resp1.Data.ID.String(), nil))
 	if wGet.Code != http.StatusOK {
 		t.Fatalf("expected 200 get job, got %d", wGet.Code)
 	}
 
-	// Retry task: non-FAILED returns 409, FAILED returns 200 and enqueues critical
 	ctx := context.Background()
 	ft, _ := jRepo.CreateFrameTask(ctx, resp1.Data.ID, uuid.New(), model.TaskTypeInitialRender, 2)
 	wRetryBad := httptest.NewRecorder()
@@ -292,6 +356,109 @@ func TestJobEndpoints_IdempotencyAndRetry(t *testing.T) {
 	}
 	if len(enq.frameQueues) != 1 || enq.frameQueues[0] != scheduler.QueueCritical {
 		t.Fatalf("expected manual retry enqueued on critical queue, got %+v", enq.frameQueues)
+	}
+}
+
+func TestJobEndpoints_ConfirmGatesRegenAndActiveVersion(t *testing.T) {
+	ctx := context.Background()
+	var sc *fakeSidecar
+	var r *gin.Engine
+	var jRepo *fakeHandlerJobRepo
+	var enq *spyEnqueuer
+
+	sc = &fakeSidecar{
+		resumeFn: func(_ context.Context, req client.ResumeWorkflowReq, _ string) (client.ResumeWorkflowResp, error) {
+			jid, _ := uuid.Parse(req.JobID)
+			if req.GateNo == 1 {
+				_, _ = jRepo.CreateFrame(ctx, jid, 1, json.RawMessage(`{"action":"f1"}`))
+				_, _ = jRepo.CreateFrame(ctx, jid, 2, json.RawMessage(`{"action":"f2"}`))
+				_ = jRepo.UpdateJobStatus(ctx, jid, model.JobStatusWaitingGate, model.JobStageGate2, nil)
+				return client.ResumeWorkflowResp{ThreadID: req.ThreadID, Status: "WAITING_GATE", CurrentStage: "GATE_2"}, nil
+			}
+			_ = jRepo.UpdateJobStatus(ctx, jid, model.JobStatusRunning, model.JobStageRenderFrames, nil)
+			return client.ResumeWorkflowResp{ThreadID: req.ThreadID, Status: "RUNNING", CurrentStage: "RENDER_FRAMES"}, nil
+		},
+		regenFn: func(_ context.Context, frameID uuid.UUID, req client.RegenerateFrameReq, _ string) (client.FrameVersionResp, error) {
+			v2ID := uuid.New()
+			jRepo.mu.Lock()
+			jRepo.versions[v2ID] = model.FrameVersion{
+				ID:             v2ID,
+				FrameID:        frameID,
+				VersionNo:      2,
+				PromptSnapshot: "updated prompt",
+				ImageURL:       "https://cdn.local/v2.png",
+			}
+			jRepo.mu.Unlock()
+			return client.FrameVersionResp{
+				ID:                   v2ID.String(),
+				FrameID:              frameID.String(),
+				VersionNo:            2,
+				PromptSnapshot:       "updated prompt",
+				ImageURL:             "https://cdn.local/v2.png",
+				CascadedFrameIndices: []int{2},
+			}, nil
+		},
+	}
+
+	r, jRepo, _, enq, _ = setupJobTestRouterWithSidecar(sc)
+	projID := uuid.New()
+	job, _, _ := jRepo.CreateOrGetByIdempotencyKey(ctx, projID, "gate-k1", "th_gate", "tr_gate", 1.0)
+	_ = jRepo.UpdateJobStatus(ctx, job.ID, model.JobStatusWaitingGate, model.JobStageGate1, nil)
+
+	// Confirm Gate 2 while still at GATE_1 -> 409 Conflict
+	wBadGate := httptest.NewRecorder()
+	r.ServeHTTP(wBadGate, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID.String()+"/gates/2/confirm", nil))
+	if wBadGate.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when confirming wrong gate, got %d", wBadGate.Code)
+	}
+
+	// Confirm Gate 1 -> 200 WAITING_GATE / GATE_2 with 2 frames
+	wG1 := httptest.NewRecorder()
+	r.ServeHTTP(wG1, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID.String()+"/gates/1/confirm", bytes.NewBufferString(`{}`)))
+	if wG1.Code != http.StatusOK {
+		t.Fatalf("expected 200 confirming Gate 1, got %d body=%s", wG1.Code, wG1.Body.String())
+	}
+
+	// Confirm Gate 2 -> 200 and enqueues Frame 1 on critical, Frame 2 on default
+	wG2 := httptest.NewRecorder()
+	r.ServeHTTP(wG2, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID.String()+"/gates/2/confirm", bytes.NewBufferString(`{}`)))
+	if wG2.Code != http.StatusOK {
+		t.Fatalf("expected 200 confirming Gate 2, got %d body=%s", wG2.Code, wG2.Body.String())
+	}
+	if len(enq.frameQueues) != 2 || enq.frameQueues[0] != scheduler.QueueCritical || enq.frameQueues[1] != scheduler.QueueDefault {
+		t.Fatalf("expected [critical default] enqueue priority, got %+v", enq.frameQueues)
+	}
+
+	frames, _ := jRepo.ListFramesByJob(ctx, job.ID)
+	f1 := frames[0]
+	v1ID := uuid.New()
+	jRepo.mu.Lock()
+	jRepo.versions[v1ID] = model.FrameVersion{ID: v1ID, FrameID: f1.ID, VersionNo: 1, PromptSnapshot: "p1", ImageURL: "https://cdn.local/v1.png"}
+	jRepo.mu.Unlock()
+
+	// Gate 3 Regenerate -> 200 with version 2 and cascaded_frame_indices=[2]
+	wRegen := httptest.NewRecorder()
+	reqRegen := httptest.NewRequest(http.MethodPost, "/api/v1/frames/"+f1.ID.String()+"/regenerate", bytes.NewBufferString(`{"user_edit_note":"warm backlight","cascade_downstream":true}`))
+	reqRegen.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(wRegen, reqRegen)
+	if wRegen.Code != http.StatusOK {
+		t.Fatalf("expected 200 regen, got %d body=%s", wRegen.Code, wRegen.Body.String())
+	}
+	var regenResp struct {
+		Data model.RegenerateFrameResponse `json:"data"`
+	}
+	_ = json.Unmarshal(wRegen.Body.Bytes(), &regenResp)
+	if regenResp.Data.Version.VersionNo != 2 || len(regenResp.Data.CascadedFrameIndices) != 1 {
+		t.Fatalf("unexpected regen response: %+v", regenResp.Data)
+	}
+
+	// Switch active version back to v1 -> 200
+	wSwitch := httptest.NewRecorder()
+	reqSwitch := httptest.NewRequest(http.MethodPut, "/api/v1/frames/"+f1.ID.String()+"/active-version", bytes.NewBufferString(`{"version_id":"`+v1ID.String()+`"}`))
+	reqSwitch.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(wSwitch, reqSwitch)
+	if wSwitch.Code != http.StatusOK {
+		t.Fatalf("expected 200 switching active version, got %d body=%s", wSwitch.Code, wSwitch.Body.String())
 	}
 }
 

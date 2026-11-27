@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
+	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/client"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/config"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/gateway"
 	"github.com/lookvincent/EchoCanvas/services/go-gateway/internal/handler"
@@ -60,7 +61,17 @@ func main() {
 	jobRepo := repository.NewPostgresJobRepository(pool)
 	usageRepo := repository.NewPostgresUsageRepository(pool)
 	broker := sse.NewRedisBroker(rdb)
-	sched := scheduler.New(jobRepo, scheduler.NewAsynqEnqueuer(asynqClient), broker, nil, nil, cfg.MaxConcurrentVision, logger)
+	pyClient := client.NewPySidecarClient(cfg.PySidecarURL, cfg.InternalAuthToken, nil)
+	workerAdapter := client.NewSidecarWorkerAdapter(pyClient, projectRepo, jobRepo, usageRepo, broker)
+	sched := scheduler.New(
+		jobRepo,
+		scheduler.NewAsynqEnqueuer(asynqClient),
+		broker,
+		workerAdapter,
+		workerAdapter,
+		cfg.MaxConcurrentVision,
+		logger,
+	)
 	gw := gateway.New(usageRepo, broker, cfg, gateway.Options{Logger: logger})
 
 	asynqSrv, asynqMux := scheduler.NewAsynqServer(cfg.RedisAddr, sched)
@@ -76,7 +87,7 @@ func main() {
 		PGPinger:          pool,
 		ProjectRepo:       projectRepo,
 		AssetRepo:         assetRepo,
-		JobHandler:        handler.NewJobHandler(jobRepo, sched),
+		JobHandler:        handler.NewJobHandlerWithSidecar(jobRepo, sched, pyClient, usageRepo, broker),
 		SSEHandler:        handler.NewSSEHandler(jobRepo, broker),
 		GatewayHandler:    handler.NewGatewayHandler(gw, usageRepo, broker),
 		InternalAuthToken: cfg.InternalAuthToken,
@@ -89,7 +100,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("go-gateway listening", "port", cfg.Port)
+		logger.Info("go-gateway listening", "port", cfg.Port, "py_sidecar", cfg.PySidecarURL)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server error", "error", err)
 			os.Exit(1)

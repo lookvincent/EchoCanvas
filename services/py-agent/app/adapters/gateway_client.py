@@ -85,7 +85,7 @@ class GatewayClient:
         self.internal_token = internal_token.strip()
         self.llm_model = llm_model
         self.vision_model = vision_model
-        self._client = httpx.Client(timeout=timeout_sec, transport=transport)
+        self._client = httpx.Client(timeout=timeout_sec, transport=transport, trust_env=False)
 
     def close(self) -> None:
         self._client.close()

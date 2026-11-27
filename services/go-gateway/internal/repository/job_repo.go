@@ -20,12 +20,16 @@ type JobRepository interface {
 	UpdateJobStatus(ctx context.Context, jobID uuid.UUID, status, stage string, errMsg *string) error
 	CreateFrame(ctx context.Context, jobID uuid.UUID, frameIndex int, scriptJSON json.RawMessage) (model.StoryFrame, error)
 	CreateFrameTask(ctx context.Context, jobID, frameID uuid.UUID, taskType string, maxRetries int) (model.FrameTask, error)
+	GetFrameByID(ctx context.Context, frameID uuid.UUID) (model.StoryFrame, error)
+	SetFrameActiveVersion(ctx context.Context, frameID, versionID uuid.UUID) (model.StoryFrame, error)
+	ListFrameVersions(ctx context.Context, frameID uuid.UUID) ([]model.FrameVersion, error)
 	GetFrameTaskByID(ctx context.Context, taskID uuid.UUID) (model.FrameTask, error)
 	ListFramesByJob(ctx context.Context, jobID uuid.UUID) ([]model.StoryFrame, error)
 	ListVersionsByJob(ctx context.Context, jobID uuid.UUID) ([]model.FrameVersion, error)
 	ListTasksByJob(ctx context.Context, jobID uuid.UUID) ([]model.FrameTask, error)
 	TransitionTaskStatus(ctx context.Context, taskID uuid.UUID, fromStatus, toStatus string, errCode, errDetail *string) (model.FrameTask, error)
 	IncrementTaskRetry(ctx context.Context, taskID uuid.UUID, toStatus string, errCode, errDetail *string) (model.FrameTask, error)
+	CheckAndFinalizeJobStatus(ctx context.Context, jobID uuid.UUID) (model.StoryJob, bool, error)
 }
 
 // PostgresJobRepository implements JobRepository backed by PostgreSQL.
@@ -293,4 +297,154 @@ func (r *PostgresJobRepository) IncrementTaskRetry(
 		return model.FrameTask{}, ErrNotFound
 	}
 	return t, err
+}
+
+func (r *PostgresJobRepository) GetFrameByID(ctx context.Context, frameID uuid.UUID) (model.StoryFrame, error) {
+	const q = `
+		SELECT id, job_id, frame_index, script_json, active_version_id, created_at, updated_at
+		FROM story_frames
+		WHERE id = $1`
+	var f model.StoryFrame
+	err := r.pool.QueryRow(ctx, q, frameID).Scan(
+		&f.ID, &f.JobID, &f.FrameIndex, &f.ScriptJSON, &f.ActiveVersionID, &f.CreatedAt, &f.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.StoryFrame{}, ErrNotFound
+	}
+	return f, err
+}
+
+func (r *PostgresJobRepository) ListFrameVersions(ctx context.Context, frameID uuid.UUID) ([]model.FrameVersion, error) {
+	const q = `
+		SELECT id, frame_id, version_no, user_edit_note, prompt_snapshot, image_url, seed, vlm_score, vlm_feedback, created_at
+		FROM frame_versions
+		WHERE frame_id = $1
+		ORDER BY version_no ASC`
+	rows, err := r.pool.Query(ctx, q, frameID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.FrameVersion, 0)
+	for rows.Next() {
+		var v model.FrameVersion
+		if err := rows.Scan(
+			&v.ID, &v.FrameID, &v.VersionNo, &v.UserEditNote, &v.PromptSnapshot,
+			&v.ImageURL, &v.Seed, &v.VLMScore, &v.VLMFeedback, &v.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, v)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresJobRepository) SetFrameActiveVersion(ctx context.Context, frameID, versionID uuid.UUID) (model.StoryFrame, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return model.StoryFrame{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var exists bool
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT EXISTS(SELECT 1 FROM frame_versions WHERE id = $1 AND frame_id = $2)`,
+		versionID, frameID,
+	).Scan(&exists); err != nil {
+		return model.StoryFrame{}, err
+	}
+	if !exists {
+		return model.StoryFrame{}, ErrNotFound
+	}
+
+	const q = `
+		UPDATE story_frames
+		SET active_version_id = $2
+		WHERE id = $1
+		RETURNING id, job_id, frame_index, script_json, active_version_id, created_at, updated_at`
+	var f model.StoryFrame
+	err = tx.QueryRow(ctx, q, frameID, versionID).Scan(
+		&f.ID, &f.JobID, &f.FrameIndex, &f.ScriptJSON, &f.ActiveVersionID, &f.CreatedAt, &f.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.StoryFrame{}, ErrNotFound
+	}
+	if err != nil {
+		return model.StoryFrame{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.StoryFrame{}, err
+	}
+	return f, nil
+}
+
+func (r *PostgresJobRepository) CheckAndFinalizeJobStatus(ctx context.Context, jobID uuid.UUID) (model.StoryJob, bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return model.StoryJob{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const lockQ = `
+		SELECT id, project_id, idempotency_key, langgraph_thread_id, trace_id, status, current_stage, budget_limit_usd, total_cost_usd, error_message, created_at, updated_at
+		FROM story_jobs
+		WHERE id = $1
+		FOR UPDATE`
+	job, err := scanJob(tx.QueryRow(ctx, lockQ, jobID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.StoryJob{}, false, ErrNotFound
+	}
+	if err != nil {
+		return model.StoryJob{}, false, err
+	}
+	if job.CurrentStage == model.JobStageDone {
+		return job, false, nil
+	}
+
+	var frameCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM story_frames WHERE job_id = $1`, jobID).Scan(&frameCount); err != nil {
+		return model.StoryJob{}, false, err
+	}
+	if frameCount == 0 {
+		return job, false, nil
+	}
+
+	var distinctFrames, activeCount, succeededCount, failedCount int
+	const statsQ = `
+		SELECT COUNT(DISTINCT frame_id),
+		       COALESCE(SUM(CASE WHEN status IN ('PENDING','QUEUED','RUNNING','VERIFYING') THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN status = 'SUCCEEDED' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0)
+		FROM frame_tasks
+		WHERE job_id = $1 AND task_type = 'INITIAL_RENDER'`
+	if err := tx.QueryRow(ctx, statsQ, jobID).Scan(&distinctFrames, &activeCount, &succeededCount, &failedCount); err != nil {
+		return model.StoryJob{}, false, err
+	}
+	if distinctFrames < frameCount || activeCount > 0 || (succeededCount+failedCount) == 0 {
+		return job, false, nil
+	}
+
+	finalStatus := model.JobStatusSucceeded
+	if failedCount > 0 && succeededCount > 0 {
+		finalStatus = model.JobStatusPartialFailed
+	} else if failedCount > 0 {
+		finalStatus = model.JobStatusFailed
+	}
+
+	const updQ = `
+		UPDATE story_jobs
+		SET status = $2::text,
+		    current_stage = 'DONE'
+		WHERE id = $1
+		RETURNING id, project_id, idempotency_key, langgraph_thread_id, trace_id, status, current_stage, budget_limit_usd, total_cost_usd, error_message, created_at, updated_at`
+	updated, err := scanJob(tx.QueryRow(ctx, updQ, jobID, finalStatus))
+	if err != nil {
+		return model.StoryJob{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.StoryJob{}, false, err
+	}
+	return updated, true, nil
 }

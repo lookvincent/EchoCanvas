@@ -19,6 +19,7 @@ type ProviderEndpoint struct {
 // Config holds runtime configuration for the Go control plane and AIGC gateway.
 type Config struct {
 	Port                      string
+	PySidecarURL              string
 	DatabaseURL               string
 	RedisAddr                 string
 	InternalAuthToken         string
@@ -43,6 +44,7 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		Port:              getEnvOrDefault("GO_GATEWAY_PORT", "8080"),
+		PySidecarURL:      getEnvOrDefault("PY_SIDECAR_URL", "http://localhost:8001"),
 		DatabaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		RedisAddr:         getEnvOrDefault("REDIS_ADDR", "localhost:6379"),
 		InternalAuthToken: strings.TrimSpace(os.Getenv("INTERNAL_AUTH_TOKEN")),

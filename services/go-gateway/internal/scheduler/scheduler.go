@@ -235,7 +235,14 @@ func (s *Scheduler) ProcessStoryParse(ctx context.Context, payload StoryParsePay
 	if s.parser == nil {
 		return nil
 	}
-	return s.parser.ParseStory(ctx, payload)
+	err := s.parser.ParseStory(ctx, payload)
+	if err != nil {
+		if jobID, parseErr := uuid.Parse(payload.JobID); parseErr == nil {
+			msg := err.Error()
+			_ = s.repo.UpdateJobStatus(ctx, jobID, model.JobStatusFailed, model.JobStageExtractAssets, &msg)
+		}
+	}
+	return err
 }
 
 // ProcessFrameTask executes a queued frame task under concurrency semaphore and state-machine guards.
@@ -295,6 +302,9 @@ func (s *Scheduler) ProcessFrameTask(ctx context.Context, payload FrameRenderPay
 				"job_total_cost_usd": res.TotalCostUSD,
 			})
 		}
+		if task.TaskType == model.TaskTypeInitialRender {
+			s.maybeFinalizeJob(ctx, task.JobID, payload.TraceID)
+		}
 		return nil
 	}
 
@@ -311,6 +321,9 @@ func (s *Scheduler) ProcessFrameTask(ctx context.Context, payload FrameRenderPay
 				"error_code": errCode,
 				"message":    errDetail,
 			})
+		}
+		if task.TaskType == model.TaskTypeInitialRender {
+			s.maybeFinalizeJob(ctx, task.JobID, payload.TraceID)
 		}
 		return transErr
 	}
@@ -342,7 +355,26 @@ func (s *Scheduler) ProcessFrameTask(ctx context.Context, payload FrameRenderPay
 			"message":    errDetail,
 		})
 	}
+	if task.TaskType == model.TaskTypeInitialRender {
+		s.maybeFinalizeJob(ctx, task.JobID, payload.TraceID)
+	}
 	return nil
+}
+
+func (s *Scheduler) maybeFinalizeJob(ctx context.Context, jobID uuid.UUID, traceID string) {
+	finalJob, finalized, err := s.repo.CheckAndFinalizeJobStatus(ctx, jobID)
+	if err != nil || !finalized {
+		return
+	}
+	if s.broker != nil {
+		_, _ = s.broker.Publish(ctx, jobID.String(), model.EventJobCompleted, map[string]any{
+			"job_id":             jobID.String(),
+			"trace_id":           traceID,
+			"status":             finalJob.Status,
+			"current_stage":      finalJob.CurrentStage,
+			"job_total_cost_usd": finalJob.TotalCostUSD,
+		})
+	}
 }
 
 // NewAsynqServer configures the Redis-backed Asynq worker server with priority queues.

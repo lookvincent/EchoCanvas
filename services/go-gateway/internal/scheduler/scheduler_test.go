@@ -195,6 +195,42 @@ func (r *memJobRepo) IncrementTaskRetry(_ context.Context, taskID uuid.UUID, toS
 	return t, nil
 }
 
+func (r *memJobRepo) GetFrameByID(_ context.Context, frameID uuid.UUID) (model.StoryFrame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, ok := r.frames[frameID]
+	if !ok {
+		return model.StoryFrame{}, repository.ErrNotFound
+	}
+	return f, nil
+}
+
+func (r *memJobRepo) SetFrameActiveVersion(_ context.Context, frameID, versionID uuid.UUID) (model.StoryFrame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, ok := r.frames[frameID]
+	if !ok {
+		return model.StoryFrame{}, repository.ErrNotFound
+	}
+	f.ActiveVersionID = &versionID
+	r.frames[frameID] = f
+	return f, nil
+}
+
+func (r *memJobRepo) ListFrameVersions(_ context.Context, _ uuid.UUID) ([]model.FrameVersion, error) {
+	return []model.FrameVersion{}, nil
+}
+
+func (r *memJobRepo) CheckAndFinalizeJobStatus(_ context.Context, jobID uuid.UUID) (model.StoryJob, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.jobs[jobID]
+	if !ok {
+		return model.StoryJob{}, false, nil
+	}
+	return j, false, nil
+}
+
 type mockEnqueuer struct {
 	mu           sync.Mutex
 	storyCalls   []StoryParsePayload
