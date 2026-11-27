@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,7 +18,15 @@ from app.adapters.gateway_client import (
 from app.config import Settings
 from app.graphs.checkpointer import CheckpointerManager
 from app.graphs.story_graph import StoryGraphCallbacks, build_story_graph
-from app.schemas import AssetCard, ParseStoryRequest, ParseStoryResponse
+from app.memory.repository import InMemoryMemoryRepository, MemoryRepository
+from app.memory.working_context import WorkingContextBuilder
+from app.schemas import (
+    AssetCard,
+    MemoryRetrieveRequest,
+    MemoryRetrieveResponse,
+    ParseStoryRequest,
+    ParseStoryResponse,
+)
 from app.security import get_trace_id, verify_internal_token
 
 logger = logging.getLogger("echocanvas.py_agent")
@@ -27,63 +34,19 @@ logger = logging.getLogger("echocanvas.py_agent")
 
 def _persist_gate1_to_pg(
     pool: Any,
+    memory_repo: MemoryRepository | InMemoryMemoryRepository,
     project_id: str | None,
     job_id: str,
     assets: list[AssetCard],
 ) -> list[AssetCard]:
-    """Persist extracted assets (preserving user_ground_truth) and move job to GATE_1."""
-    if pool is None:
-        return assets
-
-    saved_assets: list[AssetCard] = []
-    with pool.connection() as conn:
-        with conn.transaction():
-            if project_id:
-                for asset in assets:
-                    row = conn.execute(
-                        """
-                        INSERT INTO asset_style_profiles (
-                            project_id, asset_type, entity_key, display_name,
-                            profile_json, reference_image_url, source, is_locked
-                        )
-                        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
-                        ON CONFLICT (project_id, entity_key) DO UPDATE SET
-                            asset_type = EXCLUDED.asset_type,
-                            display_name = EXCLUDED.display_name,
-                            profile_json = EXCLUDED.profile_json,
-                            reference_image_url = COALESCE(EXCLUDED.reference_image_url, asset_style_profiles.reference_image_url),
-                            source = EXCLUDED.source,
-                            is_locked = EXCLUDED.is_locked
-                        WHERE asset_style_profiles.source <> 'user_ground_truth'
-                           OR EXCLUDED.source = 'user_ground_truth'
-                        RETURNING id::text AS id, asset_type, entity_key, display_name,
-                                  profile_json, reference_image_url, source, is_locked
-                        """,
-                        (
-                            project_id,
-                            asset.asset_type,
-                            asset.entity_key,
-                            asset.display_name,
-                            json.dumps(asset.profile_json, ensure_ascii=False),
-                            asset.reference_image_url,
-                            asset.source,
-                            asset.is_locked,
-                        ),
-                    ).fetchone()
-                    if row is None:
-                        row = conn.execute(
-                            """
-                            SELECT id::text AS id, asset_type, entity_key, display_name,
-                                   profile_json, reference_image_url, source, is_locked
-                            FROM asset_style_profiles
-                            WHERE project_id = %s AND entity_key = %s
-                            """,
-                            (project_id, asset.entity_key),
-                        ).fetchone()
-                    saved_assets.append(AssetCard.model_validate(row))
-            else:
-                saved_assets = assets
-
+    """Persist extracted assets with embeddings (preserving user_ground_truth) and move job to GATE_1."""
+    saved_assets = (
+        memory_repo.upsert_assets(project_id, assets)
+        if project_id
+        else assets
+    )
+    if pool is not None:
+        with pool.connection() as conn:
             conn.execute(
                 """
                 UPDATE story_jobs
@@ -92,7 +55,6 @@ def _persist_gate1_to_pg(
                 """,
                 (job_id,),
             )
-
     return saved_assets
 
 
@@ -101,6 +63,7 @@ def create_app(
     gateway_client: GatewayClient | None = None,
     checkpointer: Any = None,
     enable_db_persistence: bool | None = None,
+    memory_repo: Any = None,
 ) -> FastAPI:
     """Create configured FastAPI app with optional injected dependencies for tests."""
     resolved_settings = settings or Settings.from_env()
@@ -120,21 +83,33 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        pool = cp_manager.ensure_pool() if use_db else None
         active_cp = checkpointer if checkpointer is not None else cp_manager.open()
+        active_mem_repo = memory_repo or (
+            MemoryRepository(pool) if pool is not None else InMemoryMemoryRepository()
+        )
         callbacks = StoryGraphCallbacks(
             on_assets_extracted=lambda st, assets: _persist_gate1_to_pg(
-                cp_manager.pool,
+                pool,
+                active_mem_repo,
                 st.get("project_id"),
                 st["job_id"],
                 assets,
             )
-            if use_db and cp_manager.pool is not None
-            else None
+            if use_db and pool is not None
+            else (
+                active_mem_repo.upsert_assets(st["project_id"], assets)
+                if st.get("project_id")
+                else None
+            )
         )
         application.state.settings = resolved_settings
         application.state.gateway_client = resolved_gateway
         application.state.cp_manager = cp_manager
+        application.state.db_pool = pool
         application.state.checkpointer = active_cp
+        application.state.memory_repo = active_mem_repo
+        application.state.context_builder = WorkingContextBuilder(active_mem_repo)
         application.state.story_graph = build_story_graph(
             resolved_gateway,
             active_cp,
@@ -191,20 +166,10 @@ def create_app(
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         assets = [AssetCard.model_validate(item) for item in (result.get("assets") or [])]
-        if use_db and cp_manager.pool is not None and payload.project_id:
-            with cp_manager.pool.connection() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT id::text AS id, asset_type, entity_key, display_name,
-                           profile_json, reference_image_url, source, is_locked
-                    FROM asset_style_profiles
-                    WHERE project_id = %s
-                    ORDER BY created_at ASC
-                    """,
-                    (payload.project_id,),
-                ).fetchall()
-                if rows:
-                    assets = [AssetCard.model_validate(r) for r in rows]
+        if payload.project_id:
+            db_assets = request.app.state.memory_repo.list_project_assets(payload.project_id)
+            if db_assets:
+                assets = db_assets
 
         return ParseStoryResponse(
             job_id=payload.job_id,
@@ -213,6 +178,24 @@ def create_app(
             current_stage="GATE_1",
             assets=assets,
             trace_id=trace_id,
+        )
+
+    @application.post(
+        "/internal/v1/memory/retrieve",
+        response_model=MemoryRetrieveResponse,
+        dependencies=[Depends(verify_internal_token)],
+    )
+    def retrieve_memory(payload: MemoryRetrieveRequest, request: Request) -> MemoryRetrieveResponse:
+        builder: WorkingContextBuilder = request.app.state.context_builder
+        return builder.build(
+            project_id=payload.project_id,
+            job_id=payload.job_id,
+            frame_index=payload.frame_index,
+            frame_script=payload.frame_script,
+            query_text=payload.query_text,
+            style_preset=payload.style_preset,
+            max_prompt_chars=payload.max_prompt_chars,
+            top_k=payload.top_k,
         )
 
     return application

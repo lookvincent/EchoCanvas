@@ -18,28 +18,36 @@ class CheckpointerManager:
         self.pool: ConnectionPool | None = None
         self.checkpointer: Any = None
 
+    def ensure_pool(self) -> ConnectionPool | None:
+        """Open and return the synchronous PostgreSQL ConnectionPool when configured."""
+        if not self.database_url:
+            return None
+        if self.pool is None:
+            self.pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=1,
+                max_size=10,
+                open=False,
+                kwargs={
+                    "autocommit": True,
+                    "prepare_threshold": 0,
+                    "row_factory": dict_row,
+                },
+            )
+            self.pool.open(wait=True)
+        return self.pool
+
     def open(self) -> Any:
         """Open connection pool and run PostgresSaver.setup() idempotently."""
         if self.checkpointer is not None:
             return self.checkpointer
 
-        if not self.database_url:
+        pool = self.ensure_pool()
+        if pool is None:
             self.checkpointer = MemorySaver()
             return self.checkpointer
 
-        self.pool = ConnectionPool(
-            conninfo=self.database_url,
-            min_size=1,
-            max_size=10,
-            open=False,
-            kwargs={
-                "autocommit": True,
-                "prepare_threshold": 0,
-                "row_factory": dict_row,
-            },
-        )
-        self.pool.open(wait=True)
-        saver = PostgresSaver(self.pool)
+        saver = PostgresSaver(pool)
         saver.setup()
         self.checkpointer = saver
         return self.checkpointer
